@@ -1,41 +1,21 @@
 [project]
-name = "pp-tracer"
+name = "ppt"
 version = "0.1.0"
-description = "Point-to-Point Tracer — latency tracing and network path analysis toolkit"
-requires-python = ">=3.11"
+description = "永久投资组合辅助工具 — 主动优化的计划器 + 记账本"
+requires-python = ">=3.8"
 dependencies = [
-    # 核心数值与数据处理
-    "numpy>=1.26",
-    "pandas>=2.1",
-    "pyarrow>=14",
-
-    # 网络与数据采集
-    "requests>=2.31",
-    "httpx>=0.26",
-
-    # 调度与存储
-    "apscheduler>=3.10",
-    "sqlalchemy>=2.0",
-    "alembic>=1.13",
-
-    # 系统支持
-    "tenacity>=8.2",
-    "psutil>=5.9",
-    "pydantic>=2.5",
-    "pydantic-settings>=2.2",
-    "python-dotenv>=1.0",
-    "click>=8.1",
+    "yfinance>=0.2.40",
+    "pandas>=2.0",
+    "rich>=13.0",
 ]
 
 [project.scripts]
-pptracer = "pptracer.cli:main"
+ppt = "ppt.cli:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4",
-    "pytest-asyncio>=0.23",
     "ruff>=0.2",
-    "mypy>=1.8",
 ]
 
 [build-system]
@@ -43,16 +23,14 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["pptracer*"]
+include = ["ppt*"]
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py38"
 line-length = 100
-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
