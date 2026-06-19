@@ -220,8 +220,14 @@ def plan(ctx: click.Context, amount: Optional[float]):
         # Minimum plan (§4.11)
         C, dca_plan = dca_minimum_plan(plan_state, tolerance=tolerance)
         rule(f"定投达标方案 — {today}")
-        if C == 0:
+        if C == 0 and not dca_plan:
             success_banner("当前持仓已达标，无需投入。")
+            return
+        if C > 0 and not dca_plan:
+            warn_card(
+                f"过冲保护触发：计算投入额 ¥{C:,.0f} 但无法改善最大偏差\n"
+                f"  {cmd_hint('尝试 ppt plan <金额> 手动指定投入额，或等待价格变动')}"
+            )
             return
         note(f"最小达标投入额: ¥{C:,.0f}")
     else:
@@ -232,7 +238,10 @@ def plan(ctx: click.Context, amount: Optional[float]):
         rule(f"定投方案 ¥{C:,.0f} — {today}")
 
     if not dca_plan:
-        warn_card("无法生成分配方案")
+        warn_card(
+            f"无法生成分配方案：投入额 ¥{C:,.0f} 过小或当前偏差已很小\n"
+            f"  {cmd_hint('尝试增大投入额 或 使用 ppt rebalance --full')}"
+        )
         return
 
     # ── Build conversion plan (§4.8, §4.10) ──
