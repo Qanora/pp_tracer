@@ -1,0 +1,12 @@
+# Gitleaks configuration for PP Tracer
+# See https://github.com/gitleaks/gitleaks#configuration
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+  ".coderabbit.yaml",
+  "CLAUDE.md",
+]
