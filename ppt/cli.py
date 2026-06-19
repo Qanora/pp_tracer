@@ -51,6 +51,11 @@ from ppt.holdings import (
 from ppt.prices import fetch_prices
 from ppt.rebalance import dca_allocate, dca_minimum_plan
 from ppt.services.health import build_conversion_trades, health_check
+from ppt.services.portfolio import (
+    build_allocation_table,
+    compute_portfolio,
+    portfolio_snapshot,
+)
 from ppt.returns import (
     bucket_correlation,
     bucket_net_cost,
@@ -106,7 +111,7 @@ def _parse_trade_arg(arg: str) -> Tuple[str, int, float]:
         raise click.BadParameter(f"格式错误: {arg}，应为 TICKER#shares@price")
 
 
-def _compute_portfolio(holdings: dict, prices: dict, usdcny: float) -> dict:
+def compute_portfolio(holdings: dict, prices: dict, usdcny: float) -> dict:
     """Compute full portfolio snapshot."""
     tv = ticker_values_cny(holdings, prices, usdcny)
     bv = bucket_values(tv)
@@ -115,7 +120,7 @@ def _compute_portfolio(holdings: dict, prices: dict, usdcny: float) -> dict:
     return {"ticker_values": tv, "bucket_values": bv, "total_value": V, "weights": w}
 
 
-def _portfolio_snapshot(holdings: dict, prices: dict, usdcny: float, target_weights: dict) -> dict:
+def portfolio_snapshot(holdings: dict, prices: dict, usdcny: float, target_weights: dict) -> dict:
     """Compute portfolio weights, deviations, and total value."""
     tv = ticker_values_cny(holdings, prices, usdcny)
     bv = bucket_values(tv)
@@ -125,7 +130,7 @@ def _portfolio_snapshot(holdings: dict, prices: dict, usdcny: float, target_weig
     return {"weights": w, "deviations": devs, "total_value": V, "bucket_values": bv}
 
 
-def _build_allocation_table(ticker_shares: dict, prices: dict, usdcny: float) -> Tuple[list, float]:
+def build_allocation_table(ticker_shares: dict, prices: dict, usdcny: float) -> Tuple[list, float]:
     """Build formatted allocation table lines. Returns (lines, total_cny)."""
     lines = [f"[{Color.fg_muted}]代码     股数     单价        金额[/]"]
     total = 0.0
@@ -242,7 +247,7 @@ def plan(ctx: click.Context, amount: Optional[float]):
             saved_txns += 1
 
     # ── Before portfolio snapshot ──
-    before = _portfolio_snapshot(holdings, prices, usdcny, target_weights)
+    before = portfolio_snapshot(holdings, prices, usdcny, target_weights)
 
     # ── Simulate after portfolio ──
     new_holdings = dict(holdings)
@@ -253,7 +258,7 @@ def plan(ctx: click.Context, amount: Optional[float]):
     for t, s in conv_buys.items():
         new_holdings[t] = new_holdings.get(t, 0) + s
 
-    after = _portfolio_snapshot(new_holdings, prices, usdcny, target_weights)
+    after = portfolio_snapshot(new_holdings, prices, usdcny, target_weights)
 
     # ── Card 1: 分配 ──
     # Combine all buys: DCA buys + conversion buys
@@ -261,7 +266,7 @@ def plan(ctx: click.Context, amount: Optional[float]):
     for t, s in conv_buys.items():
         all_buys[t] = all_buys.get(t, 0) + s
 
-    alloc_lines, alloc_total = _build_allocation_table(all_buys, prices, usdcny)
+    alloc_lines, alloc_total = build_allocation_table(all_buys, prices, usdcny)
     panel("分配方案", alloc_lines, accent=Color.accent, border=Color.border_ok)
 
     # ── Card 2: 变化 (before → after) ──
@@ -517,7 +522,7 @@ def status(ctx: click.Context):
     usdcny = prices_data["usdcny"]
     cfg = ctx.obj["config"].data
 
-    pf = _compute_portfolio(state["holdings"], prices, usdcny)
+    pf = compute_portfolio(state["holdings"], prices, usdcny)
     V = pf["total_value"]
     w = pf["weights"]
     tv = pf["ticker_values"]
