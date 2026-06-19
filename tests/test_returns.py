@@ -1,6 +1,5 @@
 """Tests for conversion, intra-bucket rebalance, correlation, returns (§4.8–§4.13)."""
 
-
 import pytest
 
 from ppt.returns import (
@@ -139,6 +138,28 @@ class TestBucketCorrelation:
             [200.0 + i * 0.1 for i in range(60)],
         )
         assert rho is None
+
+    def test_nan_in_prices_returns_none(self):
+        """NaN in price history → None (not silently clamped to +1.0)."""
+        # Construct data where NaN is present but both variances are non-trivial
+        # so the old code would NOT be saved by the zero-variance guard.
+        prices_a = [100.0 + 2.0 * i for i in range(1, 32)]  # 31 non-NaN points
+        prices_a.append(float("nan"))
+        prices_a.extend([prices_a[30] + 2.0 * i for i in range(1, 31)])
+
+        prices_b = [200.0 + i * 3.0 for i in range(62)]
+
+        rho = bucket_correlation(prices_a, prices_b)
+        assert rho is None, f"NaN returns should yield None, got {rho!r}"
+
+    def test_inf_in_prices_returns_none(self):
+        """Inf in price history → None."""
+        prices_a = [100.0 + i * 5.0 for i in range(62)]
+        prices_b = [100.0 + i * 5.0 for i in range(62)]
+        prices_b[31] = float("inf")
+
+        rho = bucket_correlation(prices_a, prices_b)
+        assert rho is None, f"Inf returns should yield None, got {rho!r}"
 
 
 class TestStockBondReversal:

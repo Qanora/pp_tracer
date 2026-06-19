@@ -172,14 +172,17 @@ def bucket_correlation(
         return None
 
     n = min(len(prices_a), len(prices_b)) - 1
-    ret_a = [
-        (prices_a[i + 1] - prices_a[i]) / prices_a[i]
-        for i in range(n)
-    ]
-    ret_b = [
-        (prices_b[i + 1] - prices_b[i]) / prices_b[i]
-        for i in range(n)
-    ]
+    ret_a = [(prices_a[i + 1] - prices_a[i]) / prices_a[i] for i in range(n)]
+    ret_b = [(prices_b[i + 1] - prices_b[i]) / prices_b[i] for i in range(n)]
+
+    # Guard: NaN/Inf returns (e.g. from yfinance fetch failures) would
+    # propagate through every downstream statistic and silently turn into
+    # +1.0 via Python's max(-1.0, min(1.0, NaN)) == 1.0 behaviour.
+    # Reject early to produce None instead of a bogus +1.0.
+    if any(math.isnan(r) or math.isinf(r) for r in ret_a) or any(
+        math.isnan(r) or math.isinf(r) for r in ret_b
+    ):
+        return None
 
     mean_a = sum(ret_a) / n
     mean_b = sum(ret_b) / n
@@ -192,6 +195,11 @@ def bucket_correlation(
 
     cov = sum((ret_a[i] - mean_a) * (ret_b[i] - mean_b) for i in range(n)) / (n - 1)
     rho = cov / math.sqrt(var_a * var_b)
+
+    # NaN-safe clamp: Python's min/max treat NaN as "not less/greater
+    # than anything", so max(-1.0, min(1.0, NaN)) silently returns 1.0.
+    if math.isnan(rho):
+        return None
     return max(-1.0, min(1.0, rho))
 
 
@@ -291,6 +299,11 @@ def cagr(V: float, cost: float, years: float) -> float:
     return (V / cost) ** (1.0 / years) - 1.0
 
 
+def _npv(rate: float, cashflows: List[Tuple[float, float]], durations: List[float]) -> float:
+    """Net present value of cashflows discounted at `rate`."""
+    return sum(cf / (1.0 + rate) ** t for (cf, _), t in zip(cashflows, durations))
+
+
 def xirr(
     cashflows: List[Tuple[float, float]],
     guess: float = 0.1,
@@ -311,21 +324,12 @@ def xirr(
     if max(durations) < EPSILON:
         return None
 
-    def npv(rate: float) -> float:
-        return sum(
-            cf / (1.0 + rate) ** t
-            for (cf, _), t in zip(cashflows, durations)
-        )
-
     def dnpv(rate: float) -> float:
-        return sum(
-            -t * cf / (1.0 + rate) ** (t + 1.0)
-            for (cf, _), t in zip(cashflows, durations)
-        )
+        return sum(-t * cf / (1.0 + rate) ** (t + 1.0) for (cf, _), t in zip(cashflows, durations))
 
     rate = guess
     for _ in range(max_iter):
-        f = npv(rate)
+        f = _npv(rate, cashflows, durations)
         df = dnpv(rate)
 
         if abs(f) < tol:
@@ -358,22 +362,17 @@ def _xirr_bisection(
     max_iter: int = 300,
 ) -> Optional[float]:
     """Bisection fallback for XIRR."""
-    def npv(rate: float) -> float:
-        return sum(
-            cf / (1.0 + rate) ** t
-            for (cf, _), t in zip(cashflows, durations)
-        )
 
     lo, hi = -0.99, 10.0
-    f_lo = npv(lo)
-    f_hi = npv(hi)
+    f_lo = _npv(lo, cashflows, durations)
+    f_hi = _npv(hi, cashflows, durations)
 
     if f_lo * f_hi > 0:
         return None  # No sign change
 
     for _ in range(max_iter):
         mid = (lo + hi) / 2.0
-        f_mid = npv(mid)
+        f_mid = _npv(mid, cashflows, durations)
 
         if abs(f_mid) < 1e-6 or (hi - lo) < 1e-8:
             return mid
