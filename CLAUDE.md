@@ -2,57 +2,29 @@
 
 永久投资组合辅助工具 — 主动优化的计划器 + 记账本。
 
-## 四层开发飞轮
+## 飞轮开发
 
-从需求到合入的全流程自动化。
+本项目使用飞轮体系进行全流程自动化开发。
 
-| 层  | Skill     | 职责                                            | Git 操作      |
-| --- | --------- | ----------------------------------------------- | ------------- |
-| 0   | `/lp-up`  | 引擎观察：执行+分析运行时数据，发现缺陷           | 无            |
-| 0   | `/lp-dp`  | 飞轮自检：分析飞轮执行上下文，发现流程偏差/冗余   | 无            |
-| 1   | `/lp-ms`  | Issue 生命周期：拆解、创建、依赖、批次、追踪    | 无            |
-| 2   | `/lp-mr`  | MR 全生命周期：commit、push、监控、修复          | 全部 git 操作 |
-| 3   | `/lp-dev` | 纯本地开发：实现/修复 → 验证 → simplify         | 无            |
+| Skill | 用途 |
+|-------|------|
+| `/fwp-plan <需求>` | 需求 → Issue → 自动交付 |
+| `/fwp-debug <bug>` | Bug 复现 → 自动修复 |
+| `/fwp-inspect` | 13 项全量巡检（运行时 + 代码审查） |
+| `/fw-audit` | AI 安全治理审计 |
+| `/fwp-resume` | 继续中断 |
+| `/fwp-help` | 查看所有命令 |
 
-**协作流程**：
-
-```
-lp-up（引擎观察）  lp-dp（飞轮自检）
-         ↘          ↙
-         lp-ms（需求拆解 → issue）
-           ↓
-         lp-mr（MR 生命周期）
-           ↓
-         lp-dev（写代码）
-           ↓ merge
-         lp-up（再执行 → 验证修复）
-         lp-dp（再审计 → 优化飞轮）
-```
+开发需求时优先使用 `/fwp-plan` 而非直接写代码。
 
 ## 命令接口
 
 所有命令以 `ppt <command>` 形式调用。详见 README.md §5。
 
-## Scripts
-
-| 脚本                                   | 用途                                         |
-| -------------------------------------- | -------------------------------------------- |
-| `scripts/watch-pr.sh <N>`            | 轮询 MR CI 状态直到 merge                    |
-| `scripts/commit-msg`                 | 校验 commit message 含 issue reference        |
-| `scripts/cleanup-merged-branches.sh` | 清理已合并但残留的 feature 分支               |
-
 ## Git 规范
 
-- **commit**: 必须关联 issue（如 `#3`、`closes #3`）
-- **push**: 只允许 `git push [-u] origin feature/<name>`（master/force push 被 guardrails 拦截）
-- **流程**: feature 分支 → MR → squash merge
-- **门禁**: CI 通过 → GitHub auto-merge
-- **清理**: MR merged 后 lp-mr 自动删除本地分支
+- commit 必须关联 issue（`#N`、`closes #N`）
+- 分支命名 `feature/issue-<N>`，从 `origin/<默认分支>` 创建
+- 流程: feature 分支 → MR → squash merge
+- CI 通过后 auto-merge
 
-## Issue Tracker
-
-GitHub Issues + `gh` CLI。
-
-## Triage Labels
-
-`needs-triage` | `needs-info` | `ready-for-agent` | `ready-for-human` | `wontfix`
