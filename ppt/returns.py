@@ -6,6 +6,8 @@ Pure calculation layer — no IO, no print, no side effects.
 import math
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
+
 from ppt.constants import (
     BUCKET_TICKERS,
     BUCKETS,
@@ -172,32 +174,21 @@ def bucket_correlation(
         return None
 
     n = min(len(prices_a), len(prices_b)) - 1
-    ret_a = [(prices_a[i + 1] - prices_a[i]) / prices_a[i] for i in range(n)]
-    ret_b = [(prices_b[i + 1] - prices_b[i]) / prices_b[i] for i in range(n)]
+    arr_a = np.asarray(prices_a[-n - 1:], dtype=np.float64)
+    arr_b = np.asarray(prices_b[-n - 1:], dtype=np.float64)
+    ret_a = np.diff(arr_a) / arr_a[:-1]
+    ret_b = np.diff(arr_b) / arr_b[:-1]
 
-    # Guard: NaN/Inf returns (e.g. from yfinance fetch failures) would
-    # propagate through every downstream statistic and silently turn into
-    # +1.0 via Python's max(-1.0, min(1.0, NaN)) == 1.0 behaviour.
-    # Reject early to produce None instead of a bogus +1.0.
-    if any(math.isnan(r) or math.isinf(r) for r in ret_a) or any(
-        math.isnan(r) or math.isinf(r) for r in ret_b
-    ):
+    # Guard: NaN/Inf returns → reject early
+    if np.any(np.isnan(ret_a)) or np.any(np.isinf(ret_a)) or \
+       np.any(np.isnan(ret_b)) or np.any(np.isinf(ret_b)):
         return None
 
-    mean_a = sum(ret_a) / n
-    mean_b = sum(ret_b) / n
-
-    var_a = sum((r - mean_a) ** 2 for r in ret_a) / (n - 1)
-    var_b = sum((r - mean_b) ** 2 for r in ret_b) / (n - 1)
-
-    if var_a < EPSILON or var_b < EPSILON:
+    if np.std(ret_a) < EPSILON or np.std(ret_b) < EPSILON:
         return None
 
-    cov = sum((ret_a[i] - mean_a) * (ret_b[i] - mean_b) for i in range(n)) / (n - 1)
-    rho = cov / math.sqrt(var_a * var_b)
+    rho = float(np.corrcoef(ret_a, ret_b)[0, 1])
 
-    # NaN-safe clamp: Python's min/max treat NaN as "not less/greater
-    # than anything", so max(-1.0, min(1.0, NaN)) silently returns 1.0.
     if math.isnan(rho):
         return None
     return max(-1.0, min(1.0, rho))
@@ -240,6 +231,10 @@ def stock_bond_reversal(
 
 # ── §4.13 收益计算 ───────────────────────────────────────────────────────────
 
+_TICKER_TO_BUCKET: Dict[str, str] = {
+    t: bucket for bucket, tickers in BUCKET_TICKERS.items() for t in tickers
+}
+
 
 def bucket_net_cost(transactions: List[dict]) -> Dict[str, float]:
     """Net cost per bucket from transaction history.
@@ -248,15 +243,11 @@ def bucket_net_cost(transactions: List[dict]) -> Dict[str, float]:
     USD transactions converted at historic usdcny rate.
     """
     costs: Dict[str, float] = {b: 0.0 for b in BUCKETS}
-    ticker_to_bucket = {}
-    for bucket, tickers in BUCKET_TICKERS.items():
-        for t in tickers:
-            ticker_to_bucket[t] = bucket
 
     for txn in transactions:
         for trade in txn.get("trades", []):
             ticker = trade["ticker"]
-            bucket = ticker_to_bucket.get(ticker)
+            bucket = _TICKER_TO_BUCKET.get(ticker)
             if bucket is None:
                 continue
             # Use amount_cny as the authoritative CNY amount for this trade
