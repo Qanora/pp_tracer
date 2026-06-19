@@ -21,43 +21,35 @@ PRIMARY_TICKER: Dict[str, str] = {
     "cash": "SGOV",
 }
 
-TICKER_WHITELIST: FrozenSet[str] = frozenset(
-    {"SPYM", "AVUV", "VGIT", "GLDM", "518880.SS", "SGOV", "511360.SS"}
-)
+# Centralised per-ticker metadata — single source of truth.
+# Adding a new ticker: add to _TICKER_META + add to BUCKET_TICKERS above.
+_TICKER_META: dict = {
+    "SPYM":      {"market": "US", "lot": 1,   "currency": "USD"},
+    "AVUV":      {"market": "US", "lot": 1,   "currency": "USD"},
+    "VGIT":      {"market": "US", "lot": 1,   "currency": "USD"},
+    "GLDM":      {"market": "US", "lot": 1,   "currency": "USD"},
+    "SGOV":      {"market": "US", "lot": 1,   "currency": "USD"},
+    "518880.SS": {"market": "A",  "lot": 100, "currency": "CNY"},
+    "511360.SS": {"market": "A",  "lot": 100, "currency": "CNY"},
+}
+
+TICKER_WHITELIST: FrozenSet[str] = frozenset(_TICKER_META.keys())
 
 TICKER_MARKET: Dict[str, str] = {
-    "SPYM": "US",
-    "AVUV": "US",
-    "VGIT": "US",
-    "GLDM": "US",
-    "SGOV": "US",
-    "518880.SS": "A",
-    "511360.SS": "A",
+    t: m["market"] for t, m in _TICKER_META.items()
 }
 
 TICKER_LOT_SIZE: Dict[str, int] = {
-    "SPYM": 1,
-    "AVUV": 1,
-    "VGIT": 1,
-    "GLDM": 1,
-    "SGOV": 1,
-    "518880.SS": 100,
-    "511360.SS": 100,
+    t: m["lot"] for t, m in _TICKER_META.items()
 }
 
 TICKER_CURRENCY: Dict[str, str] = {
-    "SPYM": "USD",
-    "AVUV": "USD",
-    "VGIT": "USD",
-    "GLDM": "USD",
-    "SGOV": "USD",
-    "518880.SS": "CNY",
-    "511360.SS": "CNY",
+    t: m["currency"] for t, m in _TICKER_META.items()
 }
 
-USD_TICKERS: FrozenSet[str] = frozenset(t for t, m in TICKER_MARKET.items() if m == "US")
-CNY_TICKERS: FrozenSet[str] = frozenset(t for t, m in TICKER_MARKET.items() if m == "A")
-A_SHARE_TICKERS: FrozenSet[str] = frozenset({"518880.SS", "511360.SS"})
+USD_TICKERS: FrozenSet[str] = frozenset(t for t, m in _TICKER_META.items() if m["market"] == "US")
+CNY_TICKERS: FrozenSet[str] = frozenset(t for t, m in _TICKER_META.items() if m["market"] == "A")
+A_SHARE_TICKERS: FrozenSet[str] = frozenset(t for t, m in _TICKER_META.items() if m["market"] == "A")
 
 # ── 固定常量 (§6 末尾固定常量表) ─────────────────────────────────────────────
 
@@ -107,8 +99,4 @@ OSS_PRICE_HISTORY_PATH: str = f"oss://{_oss_bucket}/pp_price_history.json"
 LOCAL_DIR: str = "~/.pp/"
 
 # yfinance
-YFINANCE_TICKERS: Tuple[str, ...] = (
-    "SPYM", "AVUV", "VGIT", "GLDM", "SGOV",
-    "518880.SS", "511360.SS",
-    "CNY=X",
-)
+YFINANCE_TICKERS: Tuple[str, ...] = tuple(list(_TICKER_META.keys()) + ["CNY=X"])
