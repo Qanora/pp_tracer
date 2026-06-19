@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 
 from ppt.constants import BUCKETS
 from ppt.display import cmd_hint, status_badge, ticker_display
-from ppt.rebalance import intra_bucket_rebalance
+from ppt.returns import intra_bucket_rebalance
 from ppt.returns import bucket_correlation, conversion_check, stock_bond_reversal
 from ppt.valuation import ticker_values_cny
 
