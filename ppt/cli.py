@@ -16,6 +16,7 @@ from ppt.constants import (
     BUCKET_TICKERS,
     BUCKETS,
     CNY_TICKERS,
+    EPSILON,
     PRIMARY_TICKER,
     TICKER_CURRENCY,
     TICKER_WHITELIST,
@@ -73,6 +74,7 @@ from ppt.valuation import (
     corridor_bounds,
     equal_target_weights,
     risk_parity_weights,
+    trend_adjusted_corridor,
     ticker_values_cny,
     total_value,
     trend_signal,
@@ -602,17 +604,23 @@ def status(ctx: click.Context):
         sigma = volatility(prices_by_bucket[b]) if len(prices_by_bucket[b]) >= 2 else None
         trend = trend_signal(prices_by_bucket[b])
         L, U = corridor_bounds(target_weights[b], sigma, k)
+        L_adj, U_adj = trend_adjusted_corridor(target_weights[b], sigma, trend, k, lam)
 
         trend_str = (
             f"[{Color.profit}]↑[/]" if trend > 0.01 else
             f"[{Color.loss}]↓[/]" if trend < -0.01 else
             f"[{Color.fg_muted}]─[/]"
         )
-        corridor_str = f"[{L:.0%}, {U:.0%}]"
+        base_corridor = f"[{L:.0%}, {U:.0%}]"
+        # Show adjusted corridor only when trend shifts boundaries
+        if abs(L_adj - L) > EPSILON or abs(U_adj - U) > EPSILON:
+            adjusted = f"{Color.fg_muted}→ [{L_adj:.0%}, {U_adj:.0%}]"
+        else:
+            adjusted = ""
 
         wt_lines.append(
             f"{b:<6} {w[b]:>5.1%} → {target_weights[b]:.0%} "
-            f"{bar} {trend_str} [{Color.fg_muted}]{corridor_str}[/] {status_badge(tone)}"
+            f"{bar} {trend_str} [{Color.fg_muted}]{base_corridor}[/]{adjusted} {status_badge(tone)}"
         )
 
         # Intra-bucket sub-items for stock
