@@ -626,7 +626,10 @@ def status(ctx: click.Context):
     prices_by_bucket: dict = {b: [] for b in BUCKETS}
     for entry in price_history:
         for b in BUCKETS:
-            prices_by_bucket[b].append(entry["prices_cny"].get(b, 0))
+            v = entry["prices_cny"].get(b, 0)
+            if v == 0 or (isinstance(v, float) and math.isnan(v)):
+                continue
+            prices_by_bucket[b].append(v)
 
     wt_lines = []
     k = cfg["advanced"]["corridor_k"]
@@ -720,18 +723,25 @@ def status(ctx: click.Context):
         border=Color.border_ok,
     )
 
-    # Append price history
-    entry = {
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "prices_cny": {
-            b: (
-                prices.get(PRIMARY_TICKER[b], 0)
-                * (usdcny if PRIMARY_TICKER[b] not in CNY_TICKERS else 1)
-            )
-            for b in BUCKETS
-        },
-    }
-    store.update_price_history(entry)
+    # Append price history — skip if any raw price is NaN
+    raw_ok = True
+    for b in BUCKETS:
+        raw = prices.get(PRIMARY_TICKER[b], 0)
+        if isinstance(raw, float) and math.isnan(raw):
+            raw_ok = False
+            break
+    if raw_ok:
+        entry = {
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "prices_cny": {
+                b: (
+                    prices.get(PRIMARY_TICKER[b], 0)
+                    * (usdcny if PRIMARY_TICKER[b] not in CNY_TICKERS else 1)
+                )
+                for b in BUCKETS
+            },
+        }
+        store.update_price_history(entry)
 
     # ── 体检卡片 ──
     alerts = _health_check(state, prices, usdcny, price_history, prices_by_bucket)
