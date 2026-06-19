@@ -5,7 +5,7 @@ are injected via function arguments (not read from files/env).
 """
 
 import math
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -99,7 +99,7 @@ def risk_parity_weights(
     # Step 2: iterative clipping
     for _ in range(max_iter):
         pinned: Dict[str, float] = {}
-        free: list[str] = []
+        free: List[str] = []
         excess = 0.0
 
         for b in buckets:
@@ -144,7 +144,7 @@ def risk_parity_weights(
 
 
 def volatility(
-    prices: list[float],
+    prices: List[float],
     fallback: Optional[float] = None,
 ) -> float:
     """60-day rolling annualized volatility from price sequence.
@@ -175,7 +175,7 @@ def corridor_bounds(
     w_star: float,
     sigma: Optional[float],
     k: float = 2.5,
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     """Adaptive rebalancing corridor.
 
     h = max(k * sigma / sqrt(12), h_min)
@@ -197,7 +197,7 @@ def corridor_bounds(
 
 
 def trend_signal(
-    prices: list[float],
+    prices: List[float],
     S: int = 10,
     L: int = 20,
 ) -> float:
@@ -224,7 +224,7 @@ def trend_adjusted_corridor(
     trend: float,
     k: float = 2.5,
     lam: float = 0.5,
-) -> tuple[float, float]:
+) -> Tuple[float, float]:
     """Adjust corridor bounds based on trend signal.
 
     - Weak bucket (trend < 0): raise upper bound (delay selling)
