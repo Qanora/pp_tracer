@@ -290,24 +290,25 @@ class HoldingsStore:
             close = df["Close"]
             existing_dates = {h["date"] for h in history}
 
-            for idx in range(len(close)):
-                row_date = str(close.index[idx].date()) if hasattr(close.index[idx], "date") else str(close.index[idx])[:10]
+            # Use iterrows() for cleaner row iteration (avoid repeated iloc lookups)
+            for row_date_idx, row_data in close.iterrows():
+                row_date = str(row_date_idx.date()) if hasattr(row_date_idx, "date") else str(row_date_idx)[:10]
                 if row_date >= earliest or row_date in existing_dates:
                     continue
 
                 # Extract USDCNY rate for this row
                 usdcny_row = 7.25
                 try:
-                    usdcny_row = float(close["CNY=X"].iloc[idx])
-                except (KeyError, IndexError, TypeError):
+                    usdcny_row = float(row_data.get("CNY=X", 7.25))
+                except (TypeError, ValueError):
                     pass
 
                 entry_cny = {}
                 for b in _BUCKETS:
                     t = PRIMARY_TICKER[b]
                     try:
-                        val = float(close[t].iloc[idx])
-                    except (KeyError, IndexError):
+                        val = float(row_data[t])
+                    except (KeyError, TypeError):
                         val = None
                     if val is not None:
                         # Convert USD tickers to CNY
