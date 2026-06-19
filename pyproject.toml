@@ -39,6 +39,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 "tests/test_rebalance.py" = ["N806", "N803"]
 "ppt/returns.py" = ["N806", "N803"]
 "tests/test_returns.py" = ["N806", "N803"]
+"ppt/display.py" = ["N806", "N803"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
