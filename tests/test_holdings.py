@@ -12,6 +12,12 @@ from ppt.holdings import (
     validate_transaction_input,
 )
 
+
+def _price(stock, bond, gold, cash):
+    """Build a prices_cny dict with bucket keys."""
+    return {"stock": stock, "bond": bond, "gold": gold, "cash": cash}
+
+
 # ── Validation ────────────────────────────────────────────────────────────────
 
 
@@ -239,3 +245,55 @@ class TestHoldingsStore:
             })
         history = store.load_price_history()
         assert len(history) <= 120
+
+    # ── clean_price_history ─────────────────────────────────────────────────
+
+    def test_clean_price_history_removes_all_nan_entries(self):
+        """Entries where every bucket price is NaN are removed."""
+        store = self.make_store_with_memory()
+        p = _price  # shorthand
+        nan = float("nan")
+        history = [
+            {"date": "2025-01-01", "prices_cny": p(100, 200, 300, 400)},
+            {"date": "2025-01-02", "prices_cny": p(nan, nan, nan, nan)},
+            {"date": "2025-01-03", "prices_cny": p(101, 201, 301, 401)},
+        ]
+        store._save_price_history(history)
+        removed = store.clean_price_history()
+        assert removed == 1
+        cleaned = store.load_price_history()
+        assert len(cleaned) == 2
+        assert cleaned[0]["date"] == "2025-01-01"
+        assert cleaned[1]["date"] == "2025-01-03"
+
+    def test_clean_price_history_removes_partial_nan_entries(self):
+        """Entries with any NaN bucket price are removed."""
+        store = self.make_store_with_memory()
+        p = _price
+        history = [
+            {"date": "2025-01-01", "prices_cny": p(100, float("nan"), 300, 400)},
+            {"date": "2025-01-02", "prices_cny": p(200, 200, 200, 200)},
+        ]
+        store._save_price_history(history)
+        removed = store.clean_price_history()
+        assert removed == 1
+        cleaned = store.load_price_history()
+        assert len(cleaned) == 1
+        assert cleaned[0]["date"] == "2025-01-02"
+
+    def test_clean_price_history_no_nan_entries(self):
+        """No-op when there are no NaN entries."""
+        store = self.make_store_with_memory()
+        history = [
+            {"date": "2025-01-01", "prices_cny": _price(100, 200, 300, 400)},
+        ]
+        store._save_price_history(history)
+        removed = store.clean_price_history()
+        assert removed == 0
+        assert len(store.load_price_history()) == 1
+
+    def test_clean_price_history_empty_history(self):
+        """No-op on empty history."""
+        store = self.make_store_with_memory()
+        removed = store.clean_price_history()
+        assert removed == 0

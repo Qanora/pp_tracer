@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import subprocess
 import tempfile
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ppt.constants import (
+    BUCKETS,
     OSS_BACKUP_PATH,
     OSS_HOLDINGS_PATH,
     OSS_PRICE_HISTORY_PATH,
@@ -18,6 +20,11 @@ from ppt.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def is_nan(val) -> bool:
+    """Check whether a value is float NaN."""
+    return isinstance(val, float) and math.isnan(val)
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
@@ -271,6 +278,24 @@ class HoldingsStore:
     def _save_price_history(self, history: List[dict]) -> None:
         """Save price history to OSS."""
         self._oss_write(OSS_PRICE_HISTORY_PATH, history)
+
+    def clean_price_history(self) -> int:
+        """Remove entries where any bucket price is NaN. Returns count removed.
+
+        Mirrors the NaN guard in cli.py status() — an entry is removed if
+        *any* of its stock/bond/gold/cash values is NaN.
+        """
+        history = self.load_price_history()
+
+        def _entry_has_nan(entry: dict) -> bool:
+            prices = entry.get("prices_cny", {})
+            return any(is_nan(prices.get(b, 0)) for b in BUCKETS)
+
+        cleaned = [e for e in history if not _entry_has_nan(e)]
+        removed = len(history) - len(cleaned)
+        if removed > 0:
+            self._save_price_history(cleaned)
+        return removed
 
     def update_price_history(self, entry: dict) -> None:
         """Append/update today's bucket price entry. Trim to max 120.

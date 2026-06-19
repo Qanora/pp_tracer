@@ -45,6 +45,7 @@ from ppt.display import (
 from ppt.holdings import (
     HoldingsStore,
     Transaction,
+    is_nan,
     validate_transaction_input,
 )
 from ppt.prices import PriceCache, PriceFetcher
@@ -627,7 +628,7 @@ def status(ctx: click.Context):
     for entry in price_history:
         for b in BUCKETS:
             v = entry["prices_cny"].get(b, 0)
-            if v == 0 or (isinstance(v, float) and math.isnan(v)):
+            if v == 0 or is_nan(v):
                 continue
             prices_by_bucket[b].append(v)
 
@@ -727,7 +728,7 @@ def status(ctx: click.Context):
     raw_ok = True
     for b in BUCKETS:
         raw = prices.get(PRIMARY_TICKER[b], 0)
-        if isinstance(raw, float) and math.isnan(raw):
+        if is_nan(raw):
             raw_ok = False
             break
     if raw_ok:
@@ -1010,6 +1011,21 @@ def init(ctx: click.Context):
     success_banner("已初始化")
 
 
+# ── clean-history ────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.pass_context
+def clean_history(ctx: click.Context):
+    """清理 price history 中的 NaN 脏数据."""
+    store: HoldingsStore = ctx.obj["store"]
+    removed = store.clean_price_history()
+    if removed > 0:
+        success_banner(f"已清理 {removed} 条 NaN 记录")
+    else:
+        note("未发现 NaN 记录")
+
+
 # ── help ──────────────────────────────────────────────────────────────────────
 
 
@@ -1030,6 +1046,7 @@ def help(ctx: click.Context):
         "ppt config show   查看配置",
         "ppt config init   生成默认配置",
         "ppt init          重置数据",
+        "ppt clean-history 清理 NaN 价格记录",
         "ppt help          此帮助",
     ]
     panel("核心命令", core_cmds, accent=Color.accent, border=Color.border_ok)
