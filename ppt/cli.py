@@ -72,6 +72,7 @@ from ppt.valuation import (
     bucket_weights,
     corridor_bounds,
     equal_target_weights,
+    risk_parity_weights,
     ticker_values_cny,
     total_value,
     trend_signal,
@@ -563,7 +564,6 @@ def status(ctx: click.Context):
     panel("持仓", lines, accent=Color.accent, border=Color.border_ok)
 
     # ── 权重卡片 (含走廊/趋势) ──
-    target_weights = equal_target_weights()
     # Load price history for vol/trend/corridor
     price_history = store.load_price_history()
     prices_by_bucket: dict = {b: [] for b in BUCKETS}
@@ -573,6 +573,22 @@ def status(ctx: click.Context):
             if v == 0 or is_nan(v):
                 continue
             prices_by_bucket[b].append(v)
+
+    # Compute target weights: risk_parity or equal
+    weighting_mode = cfg["advanced"].get("weighting_mode", "equal")
+    if weighting_mode == "risk_parity":
+        sigmas = {b: volatility(prices_by_bucket[b]) for b in BUCKETS
+                  if len(prices_by_bucket[b]) >= 2}
+        if len(sigmas) == len(BUCKETS):
+            target_weights = risk_parity_weights(
+                sigmas,
+                cap=cfg["advanced"].get("rp_weight_cap", 0.40),
+                floor=cfg["advanced"].get("rp_weight_floor", 0.10),
+            )
+        else:
+            target_weights = equal_target_weights()
+    else:
+        target_weights = equal_target_weights()
 
     wt_lines = []
     k = cfg["advanced"]["corridor_k"]
