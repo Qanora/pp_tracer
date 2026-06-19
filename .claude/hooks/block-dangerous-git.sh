@@ -10,7 +10,7 @@ if echo "$cmd" | grep -qE 'git push .*--force'; then
   exit 1
 fi
 
-# Block push to master/main
+# Block push to main/master
 if echo "$cmd" | grep -qE 'git push.*(master|main)'; then
   echo "BLOCKED: pushing to master/main is not allowed. Use feature branches."
   exit 1
