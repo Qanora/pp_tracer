@@ -5,7 +5,6 @@ import logging
 import math
 import os
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,6 +17,7 @@ from ppt.constants import (
     TICKER_LOT_SIZE,
     TICKER_WHITELIST,
 )
+from ppt.storage import IStorageBackend, OssBackend
 
 logger = logging.getLogger(__name__)
 
@@ -108,99 +108,31 @@ class Transaction:
 class HoldingsStore:
     """OSS-only holdings state manager. No local data files (§2.1)."""
 
-    def __init__(self, local_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        local_dir: Optional[Path] = None,
+        backend: Optional[IStorageBackend] = None,
+    ):
         # local_dir kept for config/logs only (no data files)
         self.local_dir = local_dir or Path.home() / ".pp"
         self.local_dir.mkdir(parents=True, exist_ok=True)
+        self.backend = backend or OssBackend()
 
-    # ── OSS core I/O ─────────────────────────────────────────────────────
-
-    def _ossutil_path(self) -> str:
-        return os.environ.get("OSSUTIL_PATH", "ossutil")
-
-    def _oss_read(self, oss_path: str) -> Optional[dict]:
-        """Read JSON from OSS via `ossutil cat`."""
-        ossutil = self._ossutil_path()
-        try:
-            result = subprocess.run(
-                [ossutil, "cat", oss_path],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                logger.warning("ossutil cat %s failed: %s", oss_path, result.stderr.strip())
-                return None
-            # Strip trailing timing line: "0.069200(s) elapsed"
-            raw = result.stdout.strip()
-            # Find the last '}' that ends the JSON object
-            last_brace = raw.rfind("}")
-            if last_brace >= 0:
-                raw = raw[: last_brace + 1]
-            return json.loads(raw)
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
-            logger.warning("OSS read error (%s): %s", oss_path, e)
-            return None
-
-    def _oss_read_list(self, oss_path: str) -> list:
-        """Read JSON list from OSS via `ossutil cat`."""
-        ossutil = self._ossutil_path()
-        try:
-            result = subprocess.run(
-                [ossutil, "cat", oss_path],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                logger.debug("ossutil cat %s failed: %s", oss_path, result.stderr.strip())
-                return []
-            raw = result.stdout.strip()
-            # Strip trailing timing line
-            last_bracket = raw.rfind("]")
-            if last_bracket >= 0:
-                raw = raw[: last_bracket + 1]
-            data = json.loads(raw)
-            return data if isinstance(data, list) else []
-        except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as e:
-            logger.debug("OSS read error (%s): %s", oss_path, e)
-            return []
-
-    def _oss_write(self, oss_path: str, data) -> bool:
-        """Write JSON to OSS via temp file + `ossutil cp`."""
-        ossutil = self._ossutil_path()
-        tmp_path = None
-        try:
-            fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="ppt_")
-            os.close(fd)
-            Path(tmp_path).write_text(
-                json.dumps(data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            result = subprocess.run(
-                [ossutil, "cp", tmp_path, oss_path, "-f"],
-                capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                logger.error("ossutil cp to %s failed: %s", oss_path, result.stderr.strip())
-                return False
-            return True
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-            logger.error("OSS write error (%s): %s", oss_path, e)
-            return False
-        finally:
-            if tmp_path and Path(tmp_path).exists():
-                Path(tmp_path).unlink(missing_ok=True)
+    # ── OSS core I/O — delegated to backend ────────────────────────────────
 
     def _oss_backup(self) -> None:
         """Create backup of holdings on OSS."""
-        ossutil = self._ossutil_path()
-        subprocess.run(
-            [ossutil, "cp", OSS_HOLDINGS_PATH, OSS_BACKUP_PATH, "-f"],
-            capture_output=True, timeout=30,
-        )
+        if isinstance(self.backend, OssBackend):
+            subprocess.run(
+                [self.backend.ossutil, "cp", OSS_HOLDINGS_PATH, OSS_BACKUP_PATH, "-f"],
+                capture_output=True, timeout=30,
+            )
 
     # ── Holdings (public API) ─────────────────────────────────────────────
 
     def load(self) -> Optional[dict]:
         """Load holdings from OSS."""
-        data = self._oss_read(OSS_HOLDINGS_PATH)
+        data = self.backend.read(OSS_HOLDINGS_PATH)
         if data and validate_holdings(data):
             return data
         if data:
@@ -211,7 +143,7 @@ class HoldingsStore:
         """Save holdings to OSS with backup."""
         # Backup existing holdings on OSS first
         self._oss_backup()
-        if not self._oss_write(OSS_HOLDINGS_PATH, data):
+        if not self.backend.write(OSS_HOLDINGS_PATH, data):
             raise RuntimeError("Failed to save holdings to OSS")
 
     # ── Transactions ─────────────────────────────────────────────────────
@@ -273,11 +205,11 @@ class HoldingsStore:
 
     def load_price_history(self) -> List[dict]:
         """Load bucket price history from OSS."""
-        return self._oss_read_list(OSS_PRICE_HISTORY_PATH)
+        return self.backend.read_list(OSS_PRICE_HISTORY_PATH)
 
     def _save_price_history(self, history: List[dict]) -> None:
         """Save price history to OSS."""
-        self._oss_write(OSS_PRICE_HISTORY_PATH, history)
+        self.backend.write(OSS_PRICE_HISTORY_PATH, history)
 
     def clean_price_history(self) -> int:
         """Remove entries where any bucket price is NaN. Returns count removed.
