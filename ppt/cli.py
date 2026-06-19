@@ -48,7 +48,7 @@ from ppt.holdings import (
     is_nan,
     validate_transaction_input,
 )
-from ppt.prices import PriceCache, PriceFetcher
+from ppt.prices import fetch_prices
 from ppt.rebalance import dca_allocate, dca_minimum_plan
 from ppt.returns import (
     bucket_correlation,
@@ -85,12 +85,9 @@ def _load_state(store: HoldingsStore) -> Optional[dict]:
 
 
 def _get_prices(fresh: bool = False, offline: bool = False) -> Optional[dict]:
-    """Fetch prices, or show error and return None."""
-    cache_dir = Path.home() / ".pp"
-    cache = PriceCache(path=cache_dir / "price_cache.json", ttl=300)
-    fetcher = PriceFetcher(cache=cache)
+    """Fetch prices via canonical fetch_prices(), with UI error handling."""
     try:
-        return fetcher.fetch(force=fresh, offline=offline)
+        return fetch_prices(force=fresh, offline=offline)
     except RuntimeError as e:
         warn_card(f"价格获取失败: {e}", icon="❌")
         return None
