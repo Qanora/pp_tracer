@@ -281,8 +281,10 @@ class PriceFetcher:
                                 usdcny = val
                             else:
                                 prices[col_name] = val
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    f"Adj Close fallback parse failed for ticker={single_ticker}: {type(e).__name__}: {e}"
+                )
 
         return (prices, usdcny)
 
