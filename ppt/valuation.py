@@ -7,6 +7,8 @@ are injected via function arguments (not read from files/env).
 import math
 from typing import Dict, Optional
 
+import numpy as np
+
 from ppt.constants import (
     BUCKET_TICKERS,
     BUCKETS,
@@ -155,18 +157,13 @@ def volatility(
     if len(prices) < 2:
         return fallback if fallback is not None else VOL_FALLBACK["stock"]
 
-    returns = [
-        (prices[i] - prices[i - 1]) / prices[i - 1]
-        for i in range(1, len(prices))
-    ]
+    arr = np.asarray(prices, dtype=np.float64)
+    returns = np.diff(arr) / arr[:-1]
 
     if len(returns) < 20:
         return fallback if fallback is not None else VOL_FALLBACK["stock"]
 
-    n = len(returns)
-    mean = sum(returns) / n
-    variance = sum((r - mean) ** 2 for r in returns) / (n - 1)
-    sigma = math.sqrt(variance) * math.sqrt(252)
+    sigma = float(np.std(returns, ddof=1) * np.sqrt(252))
 
     return max(sigma, VOL_FLOOR)
 
@@ -211,8 +208,9 @@ def trend_signal(
     if len(prices) < L:
         return 0.0
 
-    ma_short = sum(prices[-S:]) / S
-    ma_long = sum(prices[-L:]) / L
+    arr = np.asarray(prices, dtype=np.float64)
+    ma_short = float(np.mean(arr[-S:]))
+    ma_long = float(np.mean(arr[-L:]))
 
     if abs(ma_long) < EPSILON:
         return 0.0
