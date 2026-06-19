@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 
 
+_logging_configured = False
+
+
 def _setup_logging() -> None:
     """Configure logging to ~/.pp/pp.log (§2.2)."""
     log_dir = Path.home() / ".pp"
@@ -25,4 +28,9 @@ def _setup_logging() -> None:
     )
 
 
-_setup_logging()
+def ensure_logging() -> None:
+    """Idempotent lazy logging setup — safe to call at any time."""
+    global _logging_configured
+    if not _logging_configured:
+        _setup_logging()
+        _logging_configured = True
