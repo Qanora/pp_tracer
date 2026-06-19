@@ -84,6 +84,7 @@ INTRA_BUCKET_TARGET: float = 0.50
 
 # 交易
 MIN_TRADE_AMOUNT: float = 500.0     # 最小交易额 (¥)
+OVERSPOOT_PROTECTION_FLOOR: float = 10000.0  # 过冲保护最低金额：<此额跳过保护
 FX_SPREAD: float = 0.003            # 汇兑安全垫
 
 # 数值
