@@ -405,6 +405,7 @@ def dca_minimum_plan(
         new_w = bucket_weights(new_bv)
         new_max_dev = max(abs(new_w[b] - target_weights[b]) for b in BUCKETS)
         if new_max_dev >= max_dev - EPSILON:
-            return (0.0, {})
+            # Return computed C so caller can report overshoot reason
+            return (C, {})
 
     return (C, plan)
