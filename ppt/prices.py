@@ -160,8 +160,16 @@ class PriceFetcher:
 
         # Validate
         errors = PriceValidator.validate(prices, usdcny)
+        blocking = []
         for e in errors:
-            logger.warning(e)
+            if "≤ 0" in e:
+                blocking.append(e)
+            else:
+                logger.warning(e)
+        if blocking:
+            raise RuntimeError(
+                "价格校验失败: " + "; ".join(blocking)
+            )
 
         # Save to cache
         data = {

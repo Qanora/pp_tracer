@@ -186,7 +186,7 @@ def dca_allocate(
     alloc = _min_trade_filter(alloc, gaps, prices, usdcny, min_trade)
 
     # Step 4: Discretization with Hamilton method
-    result = _discretize_hamilton(alloc, prices, usdcny)
+    result = _discretize_hamilton(alloc, prices, usdcny, holdings)
 
     return result
 
@@ -260,6 +260,7 @@ def _discretize_hamilton(
     alloc: Dict[str, float],
     prices: Dict[str, float],
     usdcny: float,
+    holdings: Dict[str, float] = None,
 ) -> Dict[str, float]:
     """Discretize allocation to lot-size units using Hamilton (max remainder) method."""
     # Map bucket allocations to ticker shares
@@ -269,8 +270,14 @@ def _discretize_hamilton(
         if len(tickers) == 1:
             ticker = tickers[0]
         else:
-            # Stock bucket: pick lower market-cap ticker (simplified: primary)
-            ticker = tickers[0]
+            # Pick lower market-cap ticker for buy side (§1)
+            if holdings:
+                t1, t2 = tickers[0], tickers[1]
+                v1 = holdings.get(t1, 0) * prices.get(t1, 0) * (usdcny if t1 not in CNY_TICKERS else 1)
+                v2 = holdings.get(t2, 0) * prices.get(t2, 0) * (usdcny if t2 not in CNY_TICKERS else 1)
+                ticker = t1 if v1 <= v2 else t2
+            else:
+                ticker = tickers[0]
         price_cny = prices.get(ticker, 0.0) * (usdcny if ticker not in CNY_TICKERS else 1.0)
         if price_cny < EPSILON:
             continue
@@ -384,8 +391,8 @@ def dca_minimum_plan(
     # Round up to nearest 100 CNY
     C = max(math.ceil(C / 100.0) * 100.0, 100.0)
 
-    # Generate plan
-    plan = dca_allocate(C, state, tolerance=tolerance)
+    # Generate plan (gap^1.0 per §4.11 step 6, no elasticity amplification)
+    plan = dca_allocate(C, state, tolerance=tolerance, elasticity=1.0)
 
     # Over-shoot protection
     if plan:
