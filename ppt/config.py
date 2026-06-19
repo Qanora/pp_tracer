@@ -4,7 +4,7 @@ import json
 import os
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "rebalance": {
@@ -49,7 +49,7 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
 class Config:
     """User configuration with defaults fallback (§6)."""
 
-    def __init__(self, data: Dict[str, Any] | None = None):
+    def __init__(self, data: Optional[Dict[str, Any]] = None):
         self.data = data if data is not None else deepcopy(DEFAULT_CONFIG)
 
     @classmethod
