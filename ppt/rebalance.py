@@ -12,6 +12,7 @@ from ppt.constants import (
     CNY_TICKERS,
     EPSILON,
     MIN_TRADE_AMOUNT,
+    OVERSPOOT_PROTECTION_FLOOR,
     TICKER_LOT_SIZE,
 )
 from ppt.valuation import bucket_values, bucket_weights, ticker_values_cny, total_value
@@ -404,8 +405,9 @@ def dca_minimum_plan(
         new_bv = bucket_values(new_tv)
         new_w = bucket_weights(new_bv)
         new_max_dev = max(abs(new_w[b] - target_weights[b]) for b in BUCKETS)
-        if new_max_dev >= max_dev - EPSILON:
-            # Return computed C so caller can report overshoot reason
+        # Only apply overshoot protection for significant amounts;
+        # small plans should not be blocked even if slightly suboptimal.
+        if new_max_dev >= max_dev - EPSILON and C > OVERSPOOT_PROTECTION_FLOOR:
             return (C, {})
 
     return (C, plan)
