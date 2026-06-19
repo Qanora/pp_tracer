@@ -14,6 +14,17 @@ from rich.table import Table
 console = Console()
 
 
+def get_console(file=None) -> Console:
+    """Return a Console instance — injectable for testing.
+
+    Pass file= to redirect output (e.g., StringIO for tests).
+    Uses module-level ``console`` when no override is given.
+    """
+    if file is not None:
+        return Console(file=file)
+    return console
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Design Tokens (§7.2 设计 token)
 # ═══════════════════════════════════════════════════════════════════════════════
