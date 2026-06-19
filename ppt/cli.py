@@ -3,6 +3,7 @@
 Orchestration layer — ties together calculation, IO, and display layers.
 """
 
+import math
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +13,7 @@ import click
 
 from ppt.config import DEFAULT_CONFIG, Config
 from ppt.constants import (
+    BUCKET_TICKERS,
     BUCKETS,
     CNY_TICKERS,
     PRIMARY_TICKER,
@@ -21,11 +23,14 @@ from ppt.constants import (
 from ppt.display import (
     Color,
     cmd_hint,
+    confirm_card,
     currency_badge,
+    dev_change,
     dev_tone,
     empty_state,
     kpi_row,
     kv,
+    kv_table,
     note,
     panel,
     price_str,
@@ -45,17 +50,25 @@ from ppt.holdings import (
 from ppt.prices import PriceCache, PriceFetcher
 from ppt.rebalance import dca_allocate, dca_minimum_plan
 from ppt.returns import (
+    bucket_correlation,
     bucket_net_cost,
+    cagr,
     conversion_check,
     intra_bucket_rebalance,
+    net_conversion_with_dca,
+    stock_bond_reversal,
     total_return,
+    xirr,
 )
 from ppt.valuation import (
     bucket_values,
     bucket_weights,
+    corridor_bounds,
     equal_target_weights,
     ticker_values_cny,
     total_value,
+    trend_signal,
+    volatility,
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -63,10 +76,10 @@ from ppt.valuation import (
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _load_state(store: HoldingsStore) -> Optional[dict]:
-    """Load holdings, or show empty state and return None."""
-    state = store.load_local()
+    """Load holdings from OSS, or show empty state and return None."""
+    state = store.load()
     if state is None:
-        empty_state(message="未初始化。请运行 ppt init 或从 OSS 同步。")
+        empty_state(message="未初始化。请运行 ppt init。")
     return state
 
 
@@ -101,6 +114,97 @@ def _compute_portfolio(holdings: dict, prices: dict, usdcny: float) -> dict:
     V = total_value(bv)
     w = bucket_weights(bv) if V > 0 else {b: 0.0 for b in BUCKETS}
     return {"ticker_values": tv, "bucket_values": bv, "total_value": V, "weights": w}
+
+
+def _portfolio_snapshot(holdings: dict, prices: dict, usdcny: float, target_weights: dict) -> dict:
+    """Compute portfolio weights, deviations, and total value."""
+    tv = ticker_values_cny(holdings, prices, usdcny)
+    bv = bucket_values(tv)
+    V = total_value(bv)
+    w = bucket_weights(bv) if V > 0 else {b: 0.0 for b in BUCKETS}
+    devs = {b: w[b] - target_weights[b] for b in BUCKETS}
+    return {"weights": w, "deviations": devs, "total_value": V, "bucket_values": bv}
+
+
+def _build_conversion_trades(holdings: dict, prices: dict, usdcny: float, cfg: dict) -> Tuple[dict, dict, list]:
+    """Build conversion sell/buy plans for GLDM→518880 and SGOV→511360 (§4.10).
+
+    Returns: (conversion_sells, conversion_buys, conversion_info)
+    """
+    tv = ticker_values_cny(holdings, prices, usdcny)
+    conv = cfg["conversion"]
+
+    conversion_sells: dict = {}
+    conversion_buys: dict = {}
+    conversion_info: list = []
+
+    # GLDM → 518880.SS
+    gldm_val = tv.get("GLDM", 0)
+    p_518880 = prices.get("518880.SS", 0)
+    if p_518880 > 0:
+        result = conversion_check("GLDM", gldm_val, p_518880, conv["gldm_shares"])
+        if result["triggered"] and result["buy_units"] > 0:
+            buy_shares = float(result["buy_units"])
+            buy_amount_cny = buy_shares * p_518880
+            p_gldm_cny = prices.get("GLDM", 0) * usdcny
+            if p_gldm_cny > 0:
+                sell_shares = min(
+                    math.ceil(buy_amount_cny / p_gldm_cny),
+                    holdings.get("GLDM", 0),
+                )
+                conversion_sells["GLDM"] = float(sell_shares)
+                conversion_buys["518880.SS"] = buy_shares
+                conversion_info.append({
+                    "bucket": "gold",
+                    "sell": "GLDM", "buy": "518880.SS",
+                    "sell_shares": float(sell_shares), "buy_shares": buy_shares,
+                    "batches": result["batches"],
+                })
+
+    # SGOV → 511360.SS
+    sgov_val = tv.get("SGOV", 0)
+    p_511360 = prices.get("511360.SS", 0)
+    if p_511360 > 0:
+        result = conversion_check("SGOV", sgov_val, p_511360, conv["sgov_shares"])
+        if result["triggered"] and result["buy_units"] > 0:
+            buy_shares = float(result["buy_units"])
+            buy_amount_cny = buy_shares * p_511360
+            p_sgov_cny = prices.get("SGOV", 0) * usdcny
+            if p_sgov_cny > 0:
+                sell_shares = min(
+                    math.ceil(buy_amount_cny / p_sgov_cny),
+                    holdings.get("SGOV", 0),
+                )
+                conversion_sells["SGOV"] = float(sell_shares)
+                conversion_buys["511360.SS"] = buy_shares
+                conversion_info.append({
+                    "bucket": "cash",
+                    "sell": "SGOV", "buy": "511360.SS",
+                    "sell_shares": float(sell_shares), "buy_shares": buy_shares,
+                    "batches": result["batches"],
+                })
+
+    return conversion_sells, conversion_buys, conversion_info
+
+
+def _build_allocation_table(ticker_shares: dict, prices: dict, usdcny: float) -> Tuple[list, float]:
+    """Build formatted allocation table lines. Returns (lines, total_cny)."""
+    lines = [f"[{Color.fg_muted}]代码     股数     单价        金额[/]"]
+    total = 0.0
+    for ticker, shares in ticker_shares.items():
+        if shares <= 0:
+            continue
+        p_cny = prices.get(ticker, 0) * (usdcny if ticker not in CNY_TICKERS else 1)
+        amt = shares * p_cny
+        total += amt
+        lines.append(
+            f"{ticker_display(ticker):<8} "
+            f"{shares:>6.0f}{ticker_unit(ticker)} "
+            f"{price_str(ticker, prices.get(ticker, 0)):>10} "
+            f"¥{amt:>10,.0f}"
+        )
+    lines.append(f"─── 合计 ¥{total:,.0f}")
+    return lines, total
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -147,81 +251,170 @@ def plan(ctx: click.Context, amount: Optional[float]):
 
     cfg = ctx.obj["config"].data
     target_weights = equal_target_weights()
+    tolerance = cfg["rebalance"]["tolerance"]
+    holdings = state["holdings"]
 
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # ── Compute DCA plan ──
+    plan_state = {
+        "holdings": holdings,
+        "prices": prices,
+        "usdcny": usdcny,
+        "target_weights": target_weights,
+    }
+
     if amount is None:
         # Minimum plan (§4.11)
-        plan_state = {
-            "holdings": state["holdings"],
-            "prices": prices,
-            "usdcny": usdcny,
-            "target_weights": target_weights,
-        }
-        tolerance = cfg["rebalance"]["tolerance"]
-        C, plan_result = dca_minimum_plan(plan_state, tolerance=tolerance)
-
+        C, dca_plan = dca_minimum_plan(plan_state, tolerance=tolerance)
         rule(f"定投达标方案 — {today}")
         if C == 0:
             success_banner("当前持仓已达标，无需投入。")
             return
-
         note(f"最小达标投入额: ¥{C:,.0f}")
-        if plan_result:
-            lines = [f"[{Color.fg_muted}]代码     股数     单价        金额[/]"]
-            total = 0.0
-            for ticker, shares in plan_result.items():
-                p_cny = prices.get(ticker, 0) * (usdcny if ticker not in CNY_TICKERS else 1)
-                amt = shares * p_cny
-                total += amt
-                lines.append(
-                    f"{ticker_display(ticker):<8} "
-                    f"{shares:>6.0f}{ticker_unit(ticker)} "
-                    f"{price_str(ticker, prices.get(ticker, 0)):>10} "
-                    f"¥{amt:>10,.0f}"
-                )
-            lines.append(f"─── 合计 ¥{total:,.0f}")
-            panel("买入建议", lines, accent=Color.accent, border=Color.border_ok)
     else:
         # DCA plan (§4.7)
-        plan_state = {
-            "holdings": state["holdings"],
-            "prices": prices,
-            "usdcny": usdcny,
-            "target_weights": target_weights,
-        }
         elasticity = cfg["advanced"]["gap_elasticity"]
-        plan_result = dca_allocate(C=amount, state=plan_state, elasticity=elasticity)
+        C = amount
+        dca_plan = dca_allocate(C=C, state=plan_state, elasticity=elasticity)
+        rule(f"定投方案 ¥{C:,.0f} — {today}")
 
-        rule(f"定投方案 ¥{amount:,.0f} — {today}")
-        if plan_result:
-            lines = [f"[{Color.fg_muted}]代码     股数     单价        金额[/]"]
-            total = 0.0
-            for ticker, shares in plan_result.items():
-                p_cny = prices.get(ticker, 0) * (usdcny if ticker not in CNY_TICKERS else 1)
-                amt = shares * p_cny
-                total += amt
-                lines.append(
-                    f"{ticker_display(ticker):<8} "
-                    f"{shares:>6.0f}{ticker_unit(ticker)} "
-                    f"{price_str(ticker, prices.get(ticker, 0)):>10} "
-                    f"¥{amt:>10,.0f}"
-                )
-            lines.append(f"─── 合计 ¥{total:,.0f}")
-            panel("分配方案", lines, accent=Color.accent, border=Color.border_ok)
+    if not dca_plan:
+        warn_card("无法生成分配方案")
+        return
 
-            # Show execution commands
-            buy_cmds = [
-                cmd_hint(
-                    f"ppt buy {ticker}#{int(shares)}@"
-                    f"{prices.get(ticker, 0):.2f}"
+    # ── Build conversion plan (§4.8, §4.10) ──
+    conv_sells, conv_buys, conv_info = _build_conversion_trades(
+        holdings, prices, usdcny, cfg
+    )
+
+    # Net merge: cancel overlapping DCA buys with conversion sells
+    prices_cny_all = {
+        t: prices.get(t, 0) * (usdcny if t not in CNY_TICKERS else 1)
+        for t in set(list(dca_plan.keys()) + list(conv_sells.keys()))
+    }
+    adjusted_dca, adjusted_sells = net_conversion_with_dca(
+        dca_plan, conv_sells, conv_buys, prices_cny_all
+    )
+
+    # Count saved transactions
+    saved_txns = 0
+    for t in conv_sells:
+        if t in dca_plan and dca_plan[t] > 0:
+            saved_txns += 1
+
+    # ── Before portfolio snapshot ──
+    before = _portfolio_snapshot(holdings, prices, usdcny, target_weights)
+
+    # ── Simulate after portfolio ──
+    new_holdings = dict(holdings)
+    for t, s in adjusted_sells.items():
+        new_holdings[t] = new_holdings.get(t, 0) - s
+    for t, s in adjusted_dca.items():
+        new_holdings[t] = new_holdings.get(t, 0) + s
+    for t, s in conv_buys.items():
+        new_holdings[t] = new_holdings.get(t, 0) + s
+
+    after = _portfolio_snapshot(new_holdings, prices, usdcny, target_weights)
+
+    # ── Card 1: 分配 ──
+    # Combine all buys: DCA buys + conversion buys
+    all_buys = dict(adjusted_dca)
+    for t, s in conv_buys.items():
+        all_buys[t] = all_buys.get(t, 0) + s
+
+    alloc_lines, alloc_total = _build_allocation_table(all_buys, prices, usdcny)
+    panel("分配方案", alloc_lines, accent=Color.accent, border=Color.border_ok)
+
+    # ── Card 2: 变化 (before → after) ──
+    changes_lines: list = []
+    for b in BUCKETS:
+        w_before = before["weights"][b]
+        w_after = after["weights"][b]
+        dev_before = before["deviations"][b]
+        dev_after = after["deviations"][b]
+        tone = dev_tone(dev_after)
+        bar = progress_bar(w_after, target_weights[b], L=0.10, U=0.40)
+        change_str = dev_change(dev_before, dev_after)
+        changes_lines.append(
+            f"{b:<6} {w_before:>5.1%} → {w_after:>5.1%} "
+            f"{bar} {change_str} {status_badge(tone)}"
+        )
+    panel("权重变化", changes_lines, accent=Color.accent, border=Color.border_ok)
+
+    # ── Card 3: 效果 ──
+    effect_lines: list = []
+
+    max_dev_before = max(abs(before["deviations"][b]) for b in BUCKETS)
+    max_dev_after = max(abs(after["deviations"][b]) for b in BUCKETS)
+    change = dev_change(
+        max_dev_before if max_dev_before > 0.001 else 0.001,
+        max_dev_after if max_dev_after > 0.001 else 0.001,
+    )
+    effect_lines.append(kv("最大偏差", f"{max_dev_before:.1%} → {max_dev_after:.1%}  {change}"))
+
+    # Remaining issues
+    over_buckets = [b for b in BUCKETS if after["deviations"][b] > tolerance]
+    under_buckets = [b for b in BUCKETS if after["deviations"][b] < -tolerance]
+    if over_buckets:
+        effect_lines.append(
+            kv("剩余超配", ", ".join(f"{b} (+{after['deviations'][b]:.1%})" for b in over_buckets))
+        )
+    else:
+        effect_lines.append(kv("剩余超配", f"[{Color.profit}]✓ 无[/]"))
+    if under_buckets:
+        effect_lines.append(
+            kv("剩余低配", ", ".join(f"{b} ({after['deviations'][b]:.1%})" for b in under_buckets))
+        )
+    else:
+        effect_lines.append(kv("剩余低配", f"[{Color.profit}]✓ 无[/]"))
+
+    # Conversion details
+    if conv_info:
+        for ci in conv_info:
+            # Check if this conversion was adjusted by netting
+            sell_shares = adjusted_sells.get(ci["sell"], ci["sell_shares"])
+            if sell_shares > 0:
+                effect_lines.append(
+                    kv(
+                        f"换仓 {ci['bucket']}",
+                        f"卖 {ticker_display(ci['sell'])} {sell_shares:.0f}股"
+                        f" → 买 {ticker_display(ci['buy'])} {ci['buy_shares']:.0f}份"
+                    )
                 )
-                for ticker, shares in plan_result.items()
-            ]
-            if buy_cmds:
-                panel("执行命令", buy_cmds, border=Color.border_info)
-        else:
-            warn_card("无法生成分配方案")
+            else:
+                effect_lines.append(
+                    kv(
+                        f"换仓 {ci['bucket']}",
+                        f"定投已覆盖 {ticker_display(ci['sell'])} 买入，直接买 "
+                        f"{ticker_display(ci['buy'])} {ci['buy_shares']:.0f}份"
+                    )
+                )
+    if saved_txns > 0:
+        effect_lines.append(kv("节省交易", f"{saved_txns} 笔 (定投与换仓合并)"))
+
+    panel("效果评估", effect_lines, accent=Color.info, border=Color.border_info)
+
+    # ── Card 4: 执行命令 ──
+    exec_lines: list = []
+    # Sell commands
+    for t, s in adjusted_sells.items():
+        if s > 0:
+            exec_lines.append(
+                cmd_hint(f"ppt sell {ticker_display(t)}#{int(s)}@"
+                         f"{prices.get(t, 0):.2f}")
+            )
+    # Buy commands
+    for t, s in all_buys.items():
+        if s > 0:
+            exec_lines.append(
+                cmd_hint(f"ppt buy {ticker_display(t)}#{int(s)}@"
+                         f"{prices.get(t, 0):.2f}")
+            )
+    if exec_lines:
+        panel("执行命令", exec_lines, border=Color.border_info)
+    else:
+        note("无需执行交易")
 
 
 # ── buy / sell ────────────────────────────────────────────────────────────────
@@ -234,7 +427,7 @@ def _record_trade(
 ):
     """Shared buy/sell logic."""
     # Parse and validate trades FIRST (before state check)
-    trades = []
+    raw_trades = []
     for arg in trade_args:
         ticker, shares, price = _parse_trade_arg(arg)
         errors = validate_transaction_input(ticker, shares, price)
@@ -242,12 +435,28 @@ def _record_trade(
             for e in errors:
                 warn_card(e, icon="❌")
             raise SystemExit(1)
-        trades.append({
+        raw_trades.append({
             "ticker": ticker,
             "shares": shares,
             "price": price,
             "currency": TICKER_CURRENCY[ticker],
         })
+
+    # Merge same-ticker trades with weighted average price (§5)
+    merged: dict = {}
+    for t in raw_trades:
+        tk = t["ticker"]
+        if tk in merged:
+            prev = merged[tk]
+            total_shares = prev["shares"] + t["shares"]
+            prev["price"] = (
+                (prev["price"] * prev["shares"] + t["price"] * t["shares"])
+                / total_shares
+            )
+            prev["shares"] = total_shares
+        else:
+            merged[tk] = dict(t)
+    trades = list(merged.values())
 
     store: HoldingsStore = ctx.obj["store"]
     state = _load_state(store)
@@ -294,17 +503,34 @@ def _record_trade(
     preview_lines.append(f"─── {action}总额: ¥{total_cny:,.2f}")
 
     if not ctx.obj["yes"]:
-        panel(f"确认{action}", preview_lines, accent=Color.warn, border=Color.border_warn)
+        confirm_card(f"确认{action}", "\n".join(preview_lines))
         choice = input(f"[{Color.fg_muted}]确认? (y/N) [/]").strip().lower()
         if choice != "y":
             note("已取消")
             return
 
+    # Sell second validation: re-check holdings after confirmation (§5)
+    if txn_type == "sell":
+        updated_state = store.load()
+        if updated_state is None:
+            warn_card("持仓数据丢失，无法完成卖出", icon="❌")
+            raise SystemExit(1)
+        for t in trades:
+            current = updated_state["holdings"].get(t["ticker"], 0)
+            if current < t["shares"]:
+                warn_card(
+                    f"{ticker_display(t['ticker'])} 持仓不足(二次校验): "
+                    f"需 {t['shares']}{ticker_unit(t['ticker'])}，"
+                    f"持 {current}{ticker_unit(t['ticker'])}",
+                    icon="❌",
+                )
+                raise SystemExit(1)
+
     # Execute
     store.add_transaction(txn)
 
     # Show result
-    updated = store.load_local()
+    updated = store.load()
     if updated:
         success_banner(f"{action}完成")
         result_lines = []
@@ -351,10 +577,12 @@ def status(ctx: click.Context):
         return
     prices = prices_data["prices"]
     usdcny = prices_data["usdcny"]
+    cfg = ctx.obj["config"].data
 
     pf = _compute_portfolio(state["holdings"], prices, usdcny)
     V = pf["total_value"]
     w = pf["weights"]
+    tv = pf["ticker_values"]
 
     today = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -362,32 +590,78 @@ def status(ctx: click.Context):
 
     # ── 持仓卡片 ──
     lines = [f"[{Color.fg_muted}]代码       股数      单价        人民币[/]"]
-    for ticker, shares in state["holdings"].items():
-        if shares <= 0:
-            continue
-        p = prices.get(ticker, 0) or 0.0
-        p_cny = p * (usdcny if ticker not in CNY_TICKERS else 1)
-        lines.append(
-            f"{ticker_display(ticker):<8} "
-            f"{shares:>8.0f}{ticker_unit(ticker)} "
-            f"{price_str(ticker, p):>10} "
-            f"{currency_badge(ticker):>8} "
-            f"¥{shares * p_cny:>10,.0f}"
-        )
+    # Group by bucket
+    _ticker_to_bucket: dict = {}
+    for bucket, tickers in BUCKET_TICKERS.items():
+        for t in tickers:
+            _ticker_to_bucket[t] = bucket
+
+    for bucket in BUCKETS:
+        bucket_total = 0.0
+        for ticker in BUCKET_TICKERS[bucket]:
+            shares = state["holdings"].get(ticker, 0)
+            if shares <= 0:
+                continue
+            p = prices.get(ticker, 0) or 0.0
+            p_cny = p * (usdcny if ticker not in CNY_TICKERS else 1)
+            val_cny = shares * p_cny
+            bucket_total += val_cny
+            prefix = "  ╰─" if ticker != BUCKET_TICKERS[bucket][0] else ""
+            lines.append(
+                f"{prefix}{ticker_display(ticker):<8} "
+                f"{shares:>8.0f}{ticker_unit(ticker)} "
+                f"{price_str(ticker, p):>10} "
+                f"{currency_badge(ticker):>8} "
+                f"¥{val_cny:>10,.0f}"
+            )
+        if bucket_total > 0 and len(BUCKET_TICKERS[bucket]) > 1:
+            lines.append(f"  {'─' * 6} {bucket}: ¥{bucket_total:,.0f}")
     lines.append(f"─── 总资产: ¥{V:,.0f}")
     panel("持仓", lines, accent=Color.accent, border=Color.border_ok)
 
-    # ── 权重卡片 ──
+    # ── 权重卡片 (含走廊/趋势) ──
     target_weights = equal_target_weights()
+    # Load price history for vol/trend/corridor
+    price_history = store.load_price_history()
+    prices_by_bucket: dict = {b: [] for b in BUCKETS}
+    for entry in price_history:
+        for b in BUCKETS:
+            prices_by_bucket[b].append(entry["prices_cny"].get(b, 0))
+
     wt_lines = []
+    k = cfg["advanced"]["corridor_k"]
+    lam = cfg["advanced"]["trend_sensitivity"]
     for b in BUCKETS:
         dev = w[b] - target_weights[b]
         tone = dev_tone(dev)
         bar = progress_bar(w[b], target_weights[b], L=0.10, U=0.40)
+
+        # Corridor & trend
+        sigma = volatility(prices_by_bucket[b]) if len(prices_by_bucket[b]) >= 2 else None
+        trend = trend_signal(prices_by_bucket[b])
+        L, U = corridor_bounds(target_weights[b], sigma, k)
+
+        trend_str = (
+            f"[{Color.profit}]↑[/]" if trend > 0.01 else
+            f"[{Color.loss}]↓[/]" if trend < -0.01 else
+            f"[{Color.fg_muted}]─[/]"
+        )
+        corridor_str = f"[{L:.0%}, {U:.0%}]"
+
         wt_lines.append(
             f"{b:<6} {w[b]:>5.1%} → {target_weights[b]:.0%} "
-            f"{bar} {status_badge(tone)}"
+            f"{bar} {trend_str} [{Color.fg_muted}]{corridor_str}[/] {status_badge(tone)}"
         )
+
+        # Intra-bucket sub-items for stock
+        if b == "stock":
+            V_stock = tv.get("SPYM", 0) + tv.get("AVUV", 0)
+            if V_stock > 0:
+                r_SPYM = tv.get("SPYM", 0) / V_stock
+                r_AVUV = tv.get("AVUV", 0) / V_stock
+                wt_lines.append(
+                    f"  ╰─SPYM  {r_SPYM:.0%}  AVUV {r_AVUV:.0%}  [{Color.fg_muted}]触发线 60%[/]"
+                )
     panel("权重", wt_lines, accent=Color.accent, border=Color.border_ok)
 
     # ── 收益卡片 ──
@@ -401,6 +675,50 @@ def status(ctx: click.Context):
         ("收益率", pct_str, value_style),
         ("累计投入", f"¥{state['cash_in']:,.0f}", Color.fg_default),
     ])
+
+    # XIRR
+    xirr_str = "N/A"
+    if state["transactions"]:
+        cashflows: list = []
+        for txn in state["transactions"]:
+            sign = -1 if txn["type"] == "buy" else 1
+            amount = txn.get("amount_cny", 0)
+            d = datetime.strptime(txn["date"], "%Y-%m-%d")
+            day_num = (d - datetime(2025, 1, 1)).days
+            cashflows.append((sign * amount, float(day_num)))
+        today_num = (datetime.now() - datetime(2025, 1, 1)).days
+        cashflows.append((V, float(today_num)))
+        xirr_val = xirr(cashflows)
+        if xirr_val is not None:
+            xirr_str = f"{xirr_val:.1%}"
+        else:
+            # Fallback to CAGR
+            net_cost = sum(bucket_costs.values())
+            years = max((datetime.now() - datetime.strptime(state["created_at"], "%Y-%m-%d")).days / 365.25, 0.01)
+            xirr_val = cagr(V, net_cost, years)
+            if xirr_val:
+                xirr_str = f"{xirr_val:.1%} (CAGR)"
+
+    # Per-bucket returns
+    bv = pf["bucket_values"]
+    bucket_return_lines: list = []
+    for b in BUCKETS:
+        cost = bucket_costs.get(b, 0)
+        val = bv.get(b, 0)
+        b_P = val - abs(cost)
+        b_pct = b_P / abs(cost) if abs(cost) > 0.001 else 0.0
+        sign = "+" if b_pct >= 0 else ""
+        bucket_return_lines.append(
+            f"{b:<6} 成本 ¥{cost:>10,.0f}  市值 ¥{val:>10,.0f}  "
+            f"[{Color.profit if b_P >= 0 else Color.loss}]{sign}{b_pct:.1%}[/]"
+        )
+
+    panel(
+        "收益",
+        [f"[{Color.fg_muted}]XIRR: [/][{value_style}]{xirr_str}[/]", ""] + bucket_return_lines,
+        accent=Color.accent,
+        border=Color.border_ok,
+    )
 
     # Append price history
     entry = {
@@ -416,16 +734,22 @@ def status(ctx: click.Context):
     store.update_price_history(entry)
 
     # ── 体检卡片 ──
-    alerts = _health_check(state, prices, usdcny)
+    alerts = _health_check(state, prices, usdcny, price_history, prices_by_bucket)
     if alerts:
         panel("体检", alerts, accent=Color.warn, border=Color.border_warn)
     else:
         panel("体检", ["✓ 无异常"], accent=Color.profit, border=Color.border_ok)
 
 
-def _health_check(state: dict, prices: dict, usdcny: float) -> List[str]:
-    """Generate health check alerts (§4.12, §4.9, §4.10)."""
-    alerts = []
+def _health_check(
+    state: dict,
+    prices: dict,
+    usdcny: float,
+    price_history: list = None,
+    prices_by_bucket: dict = None,
+) -> List[str]:
+    """Generate health check alerts (§4.12, §4.9, §4.10). Sorted by severity."""
+    alerts: list = []  # (severity: 0=crit, 1=warn, 2=info, msg)
 
     # Conversion triggers
     tv = ticker_values_cny(state["holdings"], prices, usdcny)
@@ -434,19 +758,24 @@ def _health_check(state: dict, prices: dict, usdcny: float) -> List[str]:
     gldm_val = tv.get("GLDM", 0)
     result = conversion_check("GLDM", gldm_val, prices.get("518880.SS", 5.50), 1000)
     if result["triggered"]:
-        alerts.append(
+        p_518880 = prices.get("518880.SS", 0)
+        alerts.append((
+            2,
             f"{status_badge('info')} 黄金换仓: GLDM → 518880 "
-            f"({result['batches']} 批)"
-        )
+            f"({result['batches']} 批, ¥{result['threshold_cny']:,.0f} 触发线)"
+            f"\n  {cmd_hint(f'ppt sell GLDM + ppt buy 518880')}"
+        ))
 
     # Check SGOV → 511360
     sgov_val = tv.get("SGOV", 0)
     result = conversion_check("SGOV", sgov_val, prices.get("511360.SS", 100), 100)
     if result["triggered"]:
-        alerts.append(
+        alerts.append((
+            2,
             f"{status_badge('info')} 现金换仓: SGOV → 511360 "
-            f"({result['batches']} 批)"
-        )
+            f"({result['batches']} 批, ¥{result['threshold_cny']:,.0f} 触发线)"
+            f"\n  {cmd_hint(f'ppt sell SGOV + ppt buy 511360')}"
+        ))
 
     # Intra-bucket rebalance
     V_SPYM = tv.get("SPYM", 0)
@@ -458,12 +787,39 @@ def _health_check(state: dict, prices: dict, usdcny: float) -> List[str]:
             max_holdings=state["holdings"],
         )
         if rb["triggered"]:
-            alerts.append(
+            alerts.append((
+                1,
                 f"{status_badge('warn')} 桶内再均衡: "
                 f"卖 {ticker_display(rb['sell_ticker'])} {rb['sell_shares']:.0f}股"
-            )
+                f" → 买 {ticker_display(rb['buy_ticker'])} {rb['buy_shares']:.0f}股"
+            ))
 
-    return alerts
+    # Correlation checks (§4.12)
+    if prices_by_bucket and price_history:
+        bucket_list = list(BUCKETS)
+        for i in range(len(bucket_list)):
+            for j in range(i + 1, len(bucket_list)):
+                b1, b2 = bucket_list[i], bucket_list[j]
+                rho = bucket_correlation(prices_by_bucket[b1], prices_by_bucket[b2])
+                if rho is not None and abs(rho) > 0.7:
+                    alerts.append((
+                        1,
+                        f"{status_badge('warn')} {b1}-{b2} 相关性过高: ρ={rho:+.2f}"
+                    ))
+
+        # Stock-bond reversal
+        reversal = stock_bond_reversal(
+            prices_by_bucket["stock"], prices_by_bucket["bond"]
+        )
+        if reversal["reversal"]:
+            alerts.append((
+                0,
+                f"{status_badge('crit')} 股债相关性反转: ρ前={reversal['rho_first']:+.2f} → ρ后={reversal['rho_second']:+.2f}"
+            ))
+
+    # Sort by severity (0=crit first, 1=warn, 2=info last)
+    alerts.sort(key=lambda x: x[0])
+    return [msg for _, msg in alerts]
 
 
 # ── history ───────────────────────────────────────────────────────────────────
@@ -484,18 +840,52 @@ def history(ctx: click.Context):
         return
 
     rule("交易历史")
-    for txn in reversed(transactions):
-        txn_type = txn["type"]
-        badge_str = status_badge("ok") if txn_type == "buy" else status_badge("warn")
-        lines = [f"日期: {txn['date']}  {badge_str}"]
-        for t in txn.get("trades", []):
+
+    # Group transactions by date, then merge same-ticker trades
+    from collections import defaultdict
+    by_date: dict = defaultdict(list)
+    for txn in transactions:
+        by_date[txn["date"]].append(txn)
+
+    for date_str in sorted(by_date.keys(), reverse=True):
+        day_txns = by_date[date_str]
+        # Collect all trades for this day, merging same ticker
+        day_trades: dict = {}  # ticker → {type, shares, total_price_weight, currency}
+        day_types = set()
+        day_total_cny = 0.0
+        for txn in day_txns:
+            day_types.add(txn["type"])
+            day_total_cny += txn.get("amount_cny", 0)
+            for t in txn.get("trades", []):
+                tk = t["ticker"]
+                if tk in day_trades:
+                    prev = day_trades[tk]
+                    prev["shares"] += t["shares"]
+                    prev["total_weighted"] += t["shares"] * t["price"]
+                else:
+                    day_trades[tk] = {
+                        "shares": t["shares"],
+                        "total_weighted": t["shares"] * t["price"],
+                        "currency": t.get("currency", "USD"),
+                    }
+
+        # Build display
+        type_label = "/".join(sorted(day_types))
+        badge_str = (
+            status_badge("ok") if "buy" in day_types and "sell" not in day_types
+            else status_badge("warn") if "sell" in day_types and "buy" not in day_types
+            else status_badge("info")
+        )
+        lines = [f"日期: {date_str}  {badge_str}"]
+        for tk, info in sorted(day_trades.items()):
+            avg_price = info["total_weighted"] / info["shares"] if info["shares"] > 0 else 0
             lines.append(
-                f"  {ticker_display(t['ticker'])} "
-                f"{t['shares']}{ticker_unit(t['ticker'])} @ "
-                f"{price_str(t['ticker'], t['price'])}"
+                f"  {ticker_display(tk)} "
+                f"{info['shares']:.0f}{ticker_unit(tk)} @ "
+                f"{price_str(tk, avg_price)} (均价)"
             )
-        lines.append(f"  总额: ¥{txn.get('amount_cny', 0):,.2f}")
-        panel(f"{txn_type.upper()} #{txn['id'][:8]}", lines, border=Color.border_dim)
+        lines.append(f"  总额: ¥{day_total_cny:,.2f}")
+        panel(f"{type_label} — {date_str}", lines, border=Color.border_dim)
 
 
 # ── undo ──────────────────────────────────────────────────────────────────────
@@ -524,7 +914,7 @@ def undo(ctx: click.Context):
         )
 
     if not ctx.obj["yes"]:
-        panel("撤销预览", preview_lines, accent=Color.warn, border=Color.border_warn)
+        confirm_card("撤销预览", "\n".join(preview_lines), prompt="确认撤销? (y/N)")
         choice = input(f"[{Color.fg_muted}]确认撤销? (y/N) [/]").strip().lower()
         if choice != "y":
             note("已取消")
@@ -532,6 +922,12 @@ def undo(ctx: click.Context):
 
     removed = store.undo_last()
     if removed:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(
+            "Undo transaction #%s: %s ¥%s",
+            last["id"][:8], last["type"], last.get("amount_cny", 0),
+        )
         success_banner("已撤销")
     else:
         warn_card("撤销失败", icon="❌")
@@ -586,14 +982,21 @@ def init(ctx: click.Context):
             return
 
     store: HoldingsStore = ctx.obj["store"]
+    # Preserve created_at if already exists (§5)
+    old_state = store.load()
+    created_at = (
+        old_state.get("created_at")
+        if old_state and old_state.get("created_at")
+        else datetime.now().strftime("%Y-%m-%d")
+    )
     data = {
         "holdings": {t: 0.0 for t in TICKER_WHITELIST},
         "cash_in": 0.0,
         "cash_out": 0.0,
         "transactions": [],
-        "created_at": datetime.now().strftime("%Y-%m-%d"),
+        "created_at": created_at,
     }
-    store.save_local(data)
+    store.save(data)
     success_banner("已初始化")
 
 

@@ -1,5 +1,6 @@
 """Asset configuration and fixed constants (§1, §6, §9)."""
 
+import os
 from typing import Dict, FrozenSet, Tuple
 
 # ── §1 资产配置 ──────────────────────────────────────────────────────────────
@@ -96,9 +97,11 @@ FX_SPREAD: float = 0.003            # 汇兑安全垫
 # 数值
 EPSILON: float = 1e-9               # 浮点比较容差
 
-# OSS 路径 (占位，由环境变量覆盖)
-OSS_HOLDINGS_PATH: str = "oss://<your-bucket>/pp_holdings.json"
-OSS_BACKUP_PATH: str = "oss://<your-bucket>/pp_holdings.backup.json"
+# OSS 路径 (可由环境变量 PP_OSS_BUCKET 覆盖)
+_oss_bucket = os.environ.get("PP_OSS_BUCKET", "pp-tracer")
+OSS_HOLDINGS_PATH: str = f"oss://{_oss_bucket}/pp_holdings.json"
+OSS_BACKUP_PATH: str = f"oss://{_oss_bucket}/pp_holdings.backup.json"
+OSS_PRICE_HISTORY_PATH: str = f"oss://{_oss_bucket}/pp_price_history.json"
 
 # 本地目录
 LOCAL_DIR: str = "~/.pp/"
