@@ -50,7 +50,13 @@ from ppt.holdings import (
     validate_transaction_input,
 )
 from ppt.prices import fetch_prices
-from ppt.rebalance import dca_allocate, dca_minimum_plan
+from ppt.rebalance import (
+    dca_allocate,
+    dca_minimum_plan,
+    multi_over_rebalance,
+    multi_under_rebalance,
+    single_over_rebalance,
+)
 from ppt.services.health import build_conversion_trades, health_check
 from ppt.services.portfolio import (
     build_allocation_table,
@@ -488,6 +494,135 @@ def _record_trade(
                 f"({action} {t['shares']}{ticker_unit(t['ticker'])})"
             )
         panel("持仓变化", result_lines, accent=Color.accent)
+
+
+# ── rebalance ────────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.option("--full", is_flag=True, help="执行强制再均衡（卖超买欠）")
+@click.option("--dry-run", is_flag=True, help="仅显示方案不执行")
+@click.pass_context
+def rebalance(ctx: click.Context, full: bool, dry_run: bool):
+    """强制再均衡。--full 卖出超配、买入欠配。默认仅诊断。"""
+    store: HoldingsStore = ctx.obj["store"]
+    state = _load_state(store)
+    if state is None:
+        return
+
+    prices_data = _get_prices(fresh=ctx.obj["fresh"], offline=ctx.obj["offline"])
+    if prices_data is None:
+        return
+    prices = prices_data["prices"]
+    usdcny = prices_data["usdcny"]
+    cfg = ctx.obj["config"].data
+
+    holdings = state["holdings"]
+    pf = compute_portfolio(holdings, prices, usdcny)
+    tv = pf["ticker_values"]
+    bv = pf["bucket_values"]
+    V = pf["total_value"]
+    w = pf["weights"]
+
+    target_weights = equal_target_weights()
+    tolerance = cfg["rebalance"]["tolerance"]
+
+    # ── Diagnostic: identify over/under buckets ──
+    over = {}
+    under = {}
+    for b in BUCKETS:
+        dev = w[b] - target_weights[b]
+        if dev > tolerance:
+            primary = PRIMARY_TICKER[b]
+            p_cny = prices.get(primary, 0) * (usdcny if primary not in CNY_TICKERS else 1)
+            over[b] = {"V_b": bv[b], "w_star": target_weights[b], "price": p_cny}
+            rule(f"{status_badge('warn')} {b}: {w[b]:.1%} > {target_weights[b]:.0%} 超配")
+        elif dev < -tolerance:
+            primary = PRIMARY_TICKER[b]
+            p_cny = prices.get(primary, 0) * (usdcny if primary not in CNY_TICKERS else 1)
+            under[b] = {"V_b": bv[b], "w_star": target_weights[b], "price": p_cny}
+            rule(f"{status_badge('info')} {b}: {w[b]:.1%} < {target_weights[b]:.0%} 欠配")
+
+    if not over and not under:
+        success_banner("所有桶均在目标区间内，无需再均衡")
+        return
+
+    if not full:
+        note("使用 --full 执行强制再均衡交易")
+        return
+
+    # ── Build rebalance plan ──
+    sell_plan = {}
+    buy_plan = {}
+
+    if over:
+        if len(over) == 1:
+            sell_plan = single_over_rebalance(
+                list(over.values())[0]["V_b"],
+                list(over.values())[0]["w_star"],
+                V,
+                list(over.values())[0]["price"],
+            )
+            if sell_plan > 0:
+                b = list(over.keys())[0]
+                sell_plan = {PRIMARY_TICKER[b]: sell_plan}
+        else:
+            sell_plan = multi_over_rebalance(over, V)
+            # Map bucket → primary ticker
+            sell_plan = {PRIMARY_TICKER[b]: s for b, s in sell_plan.items()
+                        if b in over}
+
+    if under:
+        buy_plan = multi_under_rebalance(under, V)
+        buy_plan = {PRIMARY_TICKER[b]: s for b, s in buy_plan.items()
+                    if b in under}
+
+    if not sell_plan and not buy_plan:
+        warn_card("无法生成再均衡方案（可能无可行解）")
+        return
+
+    # ── Display plan ──
+    lines = []
+    if sell_plan:
+        alloc_lines, sell_total = build_allocation_table(sell_plan, prices, usdcny)
+        lines.append(f"[{Color.fg_muted}]─── 卖出 ──[/]")
+        lines.extend(alloc_lines)
+    if buy_plan:
+        alloc_lines, buy_total = build_allocation_table(buy_plan, prices, usdcny)
+        lines.append(f"[{Color.fg_muted}]─── 买入 ──[/]")
+        lines.extend(alloc_lines)
+
+    panel("强制再均衡方案", lines, accent=Color.accent)
+
+    if dry_run:
+        note("dry-run: 未执行交易")
+        return
+
+    # ── Confirm & execute ──
+    if not ctx.obj["yes"]:
+        confirm_card("执行以上交易？ [Y/n]")
+        try:
+            ans = input()
+            if ans.lower() not in ("", "y", "yes"):
+                note("已取消")
+                return
+        except (EOFError, KeyboardInterrupt):
+            note("已取消")
+            return
+
+    for ticker, shares in {**sell_plan, **buy_plan}.items():
+        p_cny = prices.get(ticker, 0) * (usdcny if ticker not in CNY_TICKERS else 1)
+        is_buy = ticker in buy_plan
+        txn = Transaction(
+            ticker=ticker, shares=shares, price=p_cny,
+            direction="buy" if is_buy else "sell",
+            usdcny=usdcny,
+        )
+        store.add_transaction(txn)
+        action = "买入" if is_buy else "卖出"
+        note(f"{action} {ticker} {shares:.0f}股 @ {p_cny:.2f}")
+
+    success_banner("强制再均衡完成")
 
 
 @main.command(context_settings=dict(ignore_unknown_options=True))
