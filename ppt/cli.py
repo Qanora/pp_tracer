@@ -358,14 +358,14 @@ def status(ctx: click.Context):
 
     today = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    rule(f"持仓全景 — {today}  USD/CNY={usdcny}")
+    rule(f"持仓全景 — {today}  USD/CNY={usdcny:.4f}")
 
     # ── 持仓卡片 ──
     lines = [f"[{Color.fg_muted}]代码       股数      单价        人民币[/]"]
     for ticker, shares in state["holdings"].items():
         if shares <= 0:
             continue
-        p = prices.get(ticker, 0)
+        p = prices.get(ticker, 0) or 0.0
         p_cny = p * (usdcny if ticker not in CNY_TICKERS else 1)
         lines.append(
             f"{ticker_display(ticker):<8} "

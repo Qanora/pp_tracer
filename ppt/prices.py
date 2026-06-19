@@ -244,14 +244,16 @@ class PriceFetcher:
             if hasattr(close, "columns"):
                 for col in close.columns:
                     col_name = col[1] if isinstance(col, tuple) else col
-                    val = close[col].iloc[-1] if hasattr(close[col], "iloc") else close[col]
-                    val = float(val)
+                    series = close[col] if hasattr(close[col], "iloc") else close[col]
+                    # Use last non-NaN value (yfinance may return NaN for today)
+                    val = float(series.dropna().iloc[-1]) if hasattr(series, "dropna") else float(series)
                     if col_name == "CNY=X":
                         usdcny = val
                     else:
                         prices[col_name] = val
             elif single_ticker:
-                val = float(close.iloc[-1])
+                s = close.dropna() if hasattr(close, "dropna") else close
+                val = float(s.iloc[-1])
                 if single_ticker == "CNY=X":
                     usdcny = val
                 else:
@@ -265,10 +267,8 @@ class PriceFetcher:
                     if hasattr(close, "columns"):
                         for col in close.columns:
                             col_name = col[1] if isinstance(col, tuple) else col
-                            if hasattr(close[col], "iloc"):
-                                val = float(close[col].iloc[-1])
-                            else:
-                                val = float(close[col])
+                            series = close[col] if hasattr(close[col], "iloc") else close[col]
+                            val = float(series.dropna().iloc[-1]) if hasattr(series, "dropna") else float(series)
                             if col_name == "CNY=X":
                                 usdcny = val
                             else:
