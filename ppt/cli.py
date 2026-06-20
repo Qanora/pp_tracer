@@ -224,10 +224,14 @@ def plan(ctx: click.Context, amount: Optional[float]):
             success_banner("当前持仓已达标，无需投入。")
             return
         if C > 0 and not dca_plan:
-            warn_card(
-                f"过冲保护触发：计算投入额 ¥{C:,.0f} 但无法改善最大偏差\n"
-                f"  {cmd_hint('尝试 ppt plan <金额> 手动指定投入额，或等待价格变动')}"
-            )
+            if C > 10000:
+                warn_card(
+                    f"过冲保护触发：计算投入额 ¥{C:,.0f} 但无法改善最大偏差\n"
+                    f"  {cmd_hint('尝试 ppt plan <金额> 手动指定投入额，或等待价格变动')}"
+                )
+            else:
+                note(f"最小投入额 ¥{C:,.0f} 过小，无法生成有效交易方案\n"
+                     f"  {cmd_hint('当前已接近达标 或 尝试 ppt plan <金额> 手动指定较大金额')}")
             return
         note(f"最小达标投入额: ¥{C:,.0f}")
     else:
