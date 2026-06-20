@@ -68,6 +68,32 @@ def total_value(bucket_vals: Dict[str, float]) -> float:
     return sum(bucket_vals.values())
 
 
+def currency_split(
+    holdings: Dict[str, float],
+    prices: Dict[str, float],
+    usdcny: float,
+) -> Dict[str, float]:
+    """Compute USD/CNY value split from ticker-level holdings.
+
+    Returns: {"usd": usd_total_cny, "cny": cny_total, "total": total}
+    """
+    from ppt.constants import CNY_TICKERS, USD_TICKERS
+
+    usd_total = 0.0
+    cny_total = 0.0
+    for ticker, shares in holdings.items():
+        if shares <= 0:
+            continue
+        p_cny = prices.get(ticker, 0.0)
+        if ticker in USD_TICKERS:
+            val = shares * p_cny * usdcny
+            usd_total += val
+        else:
+            val = shares * p_cny
+            cny_total += val
+    return {"usd": usd_total, "cny": cny_total, "total": usd_total + cny_total}
+
+
 # ── §4.2 目标权重 ────────────────────────────────────────────────────────────
 
 

@@ -78,6 +78,7 @@ from ppt.valuation import (
     bucket_values,
     bucket_weights,
     corridor_bounds,
+    currency_split,
     equal_target_weights,
     risk_parity_weights,
     trend_adjusted_corridor,
@@ -365,6 +366,21 @@ def plan(ctx: click.Context, amount: Optional[float]):
                 )
     if saved_txns > 0:
         effect_lines.append(kv("节省交易", f"{saved_txns} 笔 (定投与换仓合并)"))
+
+    # CNY/USD balance
+    cur = currency_split(new_holdings, prices, usdcny)
+    if cur["total"] > 0:
+        usd_pct = cur["usd"] / cur["total"]
+        cny_pct = cur["cny"] / cur["total"]
+        bar_len = 20
+        usd_bars = max(1, round(usd_pct * bar_len))
+        cny_bars = bar_len - usd_bars
+        usd_bar = "█" * usd_bars
+        cny_bar = "░" * cny_bars
+        effect_lines.append(
+            kv("货币均衡", f"${usd_bar}{cny_bar}¥  "
+                          f"{usd_pct:.0%} / {cny_pct:.0%}")
+        )
 
     panel("效果评估", effect_lines, accent=Color.info, border=Color.border_info)
 
@@ -689,6 +705,16 @@ def status(ctx: click.Context):
     today = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     rule(f"持仓全景 — {today}  USD/CNY={usdcny:.4f}")
+
+    # CNY/USD balance
+    cur = currency_split(state["holdings"], prices, usdcny)
+    if cur["total"] > 0:
+        usd_pct = cur["usd"] / cur["total"]
+        cny_pct = cur["cny"] / cur["total"]
+        bar_len = 20
+        usd_bars = max(1, round(usd_pct * bar_len))
+        cny_bars = bar_len - usd_bars
+        rule(f"货币均衡  ${'█' * usd_bars}{'░' * cny_bars}¥  {usd_pct:.0%} / {cny_pct:.0%}")
 
     # ── 持仓卡片 ──
     lines = [f"[{Color.fg_muted}]代码       股数      单价        人民币[/]"]
