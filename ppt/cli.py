@@ -706,16 +706,6 @@ def status(ctx: click.Context):
 
     rule(f"持仓全景 — {today}  USD/CNY={usdcny:.4f}")
 
-    # CNY/USD balance
-    cur = currency_split(state["holdings"], prices, usdcny)
-    if cur["total"] > 0:
-        usd_pct = cur["usd"] / cur["total"]
-        cny_pct = cur["cny"] / cur["total"]
-        bar_len = 20
-        usd_bars = max(1, round(usd_pct * bar_len))
-        cny_bars = bar_len - usd_bars
-        rule(f"货币均衡  ${'█' * usd_bars}{'░' * cny_bars}¥  {usd_pct:.0%} / {cny_pct:.0%}")
-
     # ── 持仓卡片 ──
     lines = [f"[{Color.fg_muted}]代码       股数      单价        人民币[/]"]
     # Group by bucket
@@ -745,6 +735,17 @@ def status(ctx: click.Context):
         if bucket_total > 0 and len(BUCKET_TICKERS[bucket]) > 1:
             lines.append(f"  {'─' * 6} {bucket}: ¥{bucket_total:,.0f}")
     lines.append(f"─── 总资产: ¥{V:,.0f}")
+
+    # CNY/USD balance inline
+    cur = currency_split(state["holdings"], prices, usdcny)
+    if cur["total"] > 0:
+        usd_pct = cur["usd"] / cur["total"]
+        cny_pct = cur["cny"] / cur["total"]
+        bar_len = 16
+        usd_bars = max(1, round(usd_pct * bar_len))
+        cny_bars = bar_len - usd_bars
+        lines.append(f"${'█' * usd_bars}{'░' * cny_bars}¥  {usd_pct:.0%} / {cny_pct:.0%}")
+
     panel("持仓", lines, accent=Color.accent, border=Color.border_ok)
 
     # ── 权重卡片 (含走廊/趋势) ──
