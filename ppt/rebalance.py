@@ -376,12 +376,20 @@ def dca_minimum_plan(
     else:
         C = (under_sum_w * V - under_sum_V) / denom
 
-    # Feasibility: ensure at least 1 lot in each under bucket
+    # Feasibility: ensure at least 1 lot in each under bucket.
+    # Use the most expensive ticker per bucket — _discretize_hamilton picks
+    # the lower-value ticker, so we must guarantee C covers all candidates.
     for b in under_buckets:
-        ticker = BUCKET_TICKERS[b][0]
-        price_cny = prices.get(ticker, 0.0) * (usdcny if ticker not in CNY_TICKERS else 1.0)
-        lot = TICKER_LOT_SIZE[ticker]
-        min_cost = lot * price_cny
+        tickers = BUCKET_TICKERS[b]
+        max_price_cny = 0.0
+        max_lot = 1
+        for t in tickers:
+            p_cny = prices.get(t, 0.0) * (usdcny if t not in CNY_TICKERS else 1.0)
+            lot = TICKER_LOT_SIZE[t]
+            if p_cny * lot > max_price_cny * max_lot:
+                max_price_cny = p_cny
+                max_lot = lot
+        min_cost = max_lot * max_price_cny
         alloc_to_b = C * (target_weights[b] * V - bv[b])
         sum_gaps = sum(max(target_weights[x] * V - bv[x], 0.0) for x in under_buckets)
         if sum_gaps > EPSILON:
