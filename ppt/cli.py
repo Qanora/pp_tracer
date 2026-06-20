@@ -739,9 +739,7 @@ def status(ctx: click.Context):
     if cur["total"] > 0:
         usd_pct = cur["usd"] / cur["total"]
         cny_pct = cur["cny"] / cur["total"]
-        usd_bars = max(1, round(usd_pct * bar_len))
-        cny_bars = bar_len - usd_bars
-        lines.append(f"  {'█' * usd_bars}{'░' * cny_bars}  ${usd_pct:.0%} / ¥{cny_pct:.0%}")
+        lines.append(f"  货币均衡  ${usd_pct:.0%} / ¥{cny_pct:.0%}")
 
     panel("持仓", lines, accent=Color.accent, border=Color.border_ok)
 
