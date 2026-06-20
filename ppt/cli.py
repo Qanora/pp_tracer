@@ -686,8 +686,8 @@ def status(ctx: click.Context):
     rule(f"持仓全景 — {today}  USD/CNY={usdcny:.4f}")
 
     # ── 持仓卡片 ──
-    # Header: text cols left, number cols right (CJK-aware)
-    lines = [f"[{Color.fg_muted}]{'代码':<4}{'股数':>9} {'单价':>10} {'币种':<4} {'金额':>10}[/]"]
+    # Header: exact visual positions matching data columns
+    lines = [f"[{Color.fg_muted}]{'代码':<7} {'股数':>7} {'单价':>8} {'币种':<4} {'金额':>9}[/]"]
     # Group by bucket
     _ticker_to_bucket: dict = {}
     for bucket, tickers in BUCKET_TICKERS.items():
