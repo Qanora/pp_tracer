@@ -686,16 +686,15 @@ def status(ctx: click.Context):
 
     rule(f"持仓全景 — {today}  USD/CNY={usdcny:.4f}")
 
-    # ── 持仓卡片 ──
+    # ── 持仓卡片: 明细 + 汇总 ──
     lines = [f"[{Color.fg_muted}]{cols(('代码',8,'left'), ('股数',9,'right'), ('单价',10,'right'), ('币种',4,'left'), ('金额',11,'right'))}[/]"]
-    # Group by bucket
     _ticker_to_bucket: dict = {}
     for bucket, tickers in BUCKET_TICKERS.items():
         for t in tickers:
             _ticker_to_bucket[t] = bucket
 
+    bucket_vals = {b: 0.0 for b in BUCKET_ORDER}
     for bucket in BUCKET_ORDER:
-        bucket_total = 0.0
         for ticker in BUCKET_TICKERS[bucket]:
             shares = state["holdings"].get(ticker, 0)
             if shares <= 0:
@@ -703,7 +702,7 @@ def status(ctx: click.Context):
             p = prices.get(ticker, 0) or 0.0
             p_cny = p * (usdcny if ticker not in CNY_TICKERS else 1)
             val_cny = shares * p_cny
-            bucket_total += val_cny
+            bucket_vals[bucket] += val_cny
             is_sub = ticker != BUCKET_TICKERS[bucket][0]
             prefix = "  ╰─" if is_sub else "  "
             curr = "USD" if ticker not in CNY_TICKERS else "CNY"
@@ -714,19 +713,26 @@ def status(ctx: click.Context):
                 (curr, 4, 'left'),
                 (f"¥{val_cny:>10,.0f}", 11, 'right'),
             ))
-        if bucket_total > 0:
-            lines.append(f"  {'─' * 6} {bucket}: ¥{bucket_total:,.0f}")
-    lines.append(f"─── 总资产: ¥{V:,.0f}")
 
-    # CNY/USD balance inline
+    # ── 汇总区: 桶分布 + 总资产 + 货币均衡 ──
+    lines.append("")
+    bar_len = 16
+    for b in BUCKET_ORDER:
+        bv = bucket_vals[b]
+        pct = bv / V if V > 0 else 0.0
+        bars = max(1, round(pct * bar_len))
+        bar = "█" * bars + "░" * (bar_len - bars)
+        lines.append(f"  {b:<6} {bar}  ¥{bv:>10,.0f}  {pct:>5.1%}")
+    lines.append(f"  {'─' * 40}")
+    lines.append(f"  总资产  ¥{V:>10,.0f}")
+
     cur = currency_split(state["holdings"], prices, usdcny)
     if cur["total"] > 0:
         usd_pct = cur["usd"] / cur["total"]
         cny_pct = cur["cny"] / cur["total"]
-        bar_len = 16
         usd_bars = max(1, round(usd_pct * bar_len))
         cny_bars = bar_len - usd_bars
-        lines.append(f"{'█' * usd_bars}{'░' * cny_bars}  ${usd_pct:.0%} / ¥{cny_pct:.0%}")
+        lines.append(f"  {'█' * usd_bars}{'░' * cny_bars}  ${usd_pct:.0%} / ¥{cny_pct:.0%}")
 
     panel("持仓", lines, accent=Color.accent, border=Color.border_ok)
 
