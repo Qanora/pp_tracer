@@ -392,8 +392,10 @@ def dca_minimum_plan(
     # Round up to nearest 100 CNY
     C = max(math.ceil(C / 100.0) * 100.0, 100.0)
 
-    # Generate plan (gap^1.0 per §4.11 step 6, no elasticity amplification)
-    plan = dca_allocate(C, state, tolerance=tolerance, elasticity=1.0)
+    # Generate plan (gap^1.0 per §4.11 step 6, no elasticity amplification).
+    # Use a lower min_trade than the default (500) so small automated plans
+    # are not filtered to empty — the user is asking for the minimum viable plan.
+    plan = dca_allocate(C, state, tolerance=tolerance, elasticity=1.0, min_trade=100.0)
 
     # Over-shoot protection
     if plan:
