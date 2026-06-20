@@ -733,7 +733,7 @@ def status(ctx: click.Context):
         bar = "█" * bars + "░" * (bar_len - bars)
         lines.append(f"  {b:<6} {bar}  ¥{bv:,.0f}  {pct:>5.1%}")
     lines.append(f"  {'─' * 40}")
-    lines.append(f"  总资产  ¥{V:>10,.0f}")
+    lines.append(f"  总资产  ¥{V:,.0f}")
 
     cur = currency_split(state["holdings"], prices, usdcny)
     if cur["total"] > 0:
@@ -859,7 +859,7 @@ def status(ctx: click.Context):
         b_pct = b_P / abs(cost) if abs(cost) > 0.001 else 0.0
         sign = "+" if b_pct >= 0 else ""
         bucket_return_lines.append(
-            f"{b:<6} 成本 ¥{cost:>10,.0f}  市值 ¥{val:>10,.0f}  "
+            f"{b:<6} 成本 ¥{cost:,.0f}  市值 ¥{val:,.0f}  "
             f"[{Color.profit if b_P >= 0 else Color.loss}]{sign}{b_pct:.1%}[/]"
         )
 
