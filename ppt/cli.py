@@ -138,28 +138,6 @@ def portfolio_snapshot(holdings: dict, prices: dict, usdcny: float, target_weigh
     w = bucket_weights(bv) if V > 0 else {b: 0.0 for b in BUCKETS}
     devs = {b: w[b] - target_weights[b] for b in BUCKETS}
     return {"weights": w, "deviations": devs, "total_value": V, "bucket_values": bv}
-
-
-def build_allocation_table(ticker_shares: dict, prices: dict, usdcny: float) -> Tuple[list, float]:
-    """Build formatted allocation table lines. Returns (lines, total_cny)."""
-    lines = [f"[{Color.fg_muted}]代码     股数     单价        金额[/]"]
-    total = 0.0
-    for ticker, shares in ticker_shares.items():
-        if shares <= 0:
-            continue
-        p_cny = prices.get(ticker, 0) * (usdcny if ticker not in CNY_TICKERS else 1)
-        amt = shares * p_cny
-        total += amt
-        lines.append(
-            f"{ticker_display(ticker):<8} "
-            f"{shares:>6.0f}{ticker_unit(ticker)} "
-            f"{price_str(ticker, prices.get(ticker, 0)):>10} "
-            f"¥{amt:>10,.0f}"
-        )
-    lines.append(f"─── 合计 ¥{total:,.0f}")
-    return lines, total
-
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -797,7 +775,7 @@ def status(ctx: click.Context):
         base_corridor = f"[{L:.0%}, {U:.0%}]"
         # Show adjusted corridor only when trend shifts boundaries
         if abs(L_adj - L) > EPSILON or abs(U_adj - U) > EPSILON:
-            adjusted = f"{Color.fg_muted}→ [{L_adj:.0%}, {U_adj:.0%}]"
+            adjusted = f"[{Color.fg_muted}]→ [{L_adj:.0%}, {U_adj:.0%}][/]"
         else:
             adjusted = ""
 
