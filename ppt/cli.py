@@ -13,6 +13,7 @@ import click
 
 from ppt.config import DEFAULT_CONFIG, Config
 from ppt.constants import (
+    BUCKET_ORDER,
     BUCKET_TICKERS,
     BUCKETS,
     CNY_TICKERS,
@@ -693,7 +694,7 @@ def status(ctx: click.Context):
         for t in tickers:
             _ticker_to_bucket[t] = bucket
 
-    for bucket in BUCKETS:
+    for bucket in BUCKET_ORDER:
         bucket_total = 0.0
         for ticker in BUCKET_TICKERS[bucket]:
             shares = state["holdings"].get(ticker, 0)
@@ -713,7 +714,7 @@ def status(ctx: click.Context):
                 (curr, 4, 'left'),
                 (f"¥{val_cny:>10,.0f}", 11, 'right'),
             ))
-        if bucket_total > 0 and len(BUCKET_TICKERS[bucket]) > 1:
+        if bucket_total > 0:
             lines.append(f"  {'─' * 6} {bucket}: ¥{bucket_total:,.0f}")
     lines.append(f"─── 总资产: ¥{V:,.0f}")
 

@@ -6,6 +6,7 @@ from typing import Dict, FrozenSet, Tuple
 # ── §1 资产配置 ──────────────────────────────────────────────────────────────
 
 BUCKETS: FrozenSet[str] = frozenset({"stock", "bond", "gold", "cash"})
+BUCKET_ORDER: Tuple[str, ...] = ("stock", "bond", "gold", "cash")  # display order
 
 BUCKET_TICKERS: Dict[str, Tuple[str, ...]] = {
     "stock": ("SPYM", "AVUV"),
