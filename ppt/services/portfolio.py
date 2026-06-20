@@ -48,7 +48,7 @@ def build_allocation_table(
             (ticker_display(ticker), 8, 'left'),
             (f"{shares:.0f}{ticker_unit(ticker)}", 9, 'right'),
             (price_str(ticker, prices.get(ticker, 0)), 10, 'right'),
-            (f"¥{amt:>10,.0f}", 11, 'right'),
+            (f"¥{amt:,.0f}", 11, 'right'),
         ))
     lines.append(f"─── 合计 ¥{total:,.0f}")
     return lines, total
