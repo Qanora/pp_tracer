@@ -378,8 +378,8 @@ def plan(ctx: click.Context, amount: Optional[float]):
         usd_bar = "█" * usd_bars
         cny_bar = "░" * cny_bars
         effect_lines.append(
-            kv("货币均衡", f"${usd_bar}{cny_bar}¥  "
-                          f"{usd_pct:.0%} / {cny_pct:.0%}")
+            kv("货币均衡", f"{usd_bar}{cny_bar}  "
+                          f"${usd_pct:.0%} / ¥{cny_pct:.0%}")
         )
 
     panel("效果评估", effect_lines, accent=Color.info, border=Color.border_info)
@@ -744,7 +744,7 @@ def status(ctx: click.Context):
         bar_len = 16
         usd_bars = max(1, round(usd_pct * bar_len))
         cny_bars = bar_len - usd_bars
-        lines.append(f"${'█' * usd_bars}{'░' * cny_bars}¥  {usd_pct:.0%} / {cny_pct:.0%}")
+        lines.append(f"{'█' * usd_bars}{'░' * cny_bars}  ${usd_pct:.0%} / ¥{cny_pct:.0%}")
 
     panel("持仓", lines, accent=Color.accent, border=Color.border_ok)
 
