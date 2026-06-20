@@ -720,7 +720,7 @@ def status(ctx: click.Context):
                 (f"{shares:.0f}{ticker_unit(ticker)}", 9, 'right'),
                 (price_str(ticker, p), 10, 'right'),
                 (curr, 4, 'left'),
-                (f"¥{val_cny:>10,.0f}", 11, 'right'),
+                (f"¥{val_cny:,.0f}", 11, 'right'),
             ))
 
     # ── 汇总区: 桶分布 + 总资产 + 货币均衡 ──
@@ -731,7 +731,7 @@ def status(ctx: click.Context):
         pct = bv / V if V > 0 else 0.0
         bars = max(1, round(pct * bar_len))
         bar = "█" * bars + "░" * (bar_len - bars)
-        lines.append(f"  {b:<6} {bar}  ¥{bv:>10,.0f}  {pct:>5.1%}")
+        lines.append(f"  {b:<6} {bar}  ¥{bv:,.0f}  {pct:>5.1%}")
     lines.append(f"  {'─' * 40}")
     lines.append(f"  总资产  ¥{V:>10,.0f}")
 
