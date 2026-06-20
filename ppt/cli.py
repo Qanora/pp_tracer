@@ -230,8 +230,11 @@ def plan(ctx: click.Context, amount: Optional[float]):
                     f"  {cmd_hint('尝试 ppt plan <金额> 手动指定投入额，或等待价格变动')}"
                 )
             else:
-                note(f"最小投入额 ¥{C:,.0f} 过小，无法生成有效交易方案\n"
-                     f"  {cmd_hint('当前已接近达标 或 尝试 ppt plan <金额> 手动指定较大金额')}")
+                # C is too small for even 1 lot in the underweight bucket
+                note(
+                    f"最小投入额 ¥{C:,.0f} 不足以购买 1 手目标标的\n"
+                    f"  {cmd_hint('当前已接近达标，或尝试 ppt plan <金额> 手动指定较大金额')}"
+                )
             return
         note(f"最小达标投入额: ¥{C:,.0f}")
     else:
