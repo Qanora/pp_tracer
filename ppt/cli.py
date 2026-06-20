@@ -28,7 +28,7 @@ from ppt.display import (
     currency_badge,
     dev_change,
     dev_tone,
-    display_width,
+    cols,
     empty_state,
     kpi_row,
     kv,
@@ -686,8 +686,7 @@ def status(ctx: click.Context):
     rule(f"持仓全景 — {today}  USD/CNY={usdcny:.4f}")
 
     # ── 持仓卡片 ──
-    # Header: exact visual positions matching data columns
-    lines = [f"[{Color.fg_muted}]{'代码':<7} {'股数':>7} {'单价':>8} {'币种':<4} {'金额':>9}[/]"]
+    lines = [f"[{Color.fg_muted}]{cols(('代码',8,'left'), ('股数',9,'right'), ('单价',10,'right'), ('币种',4,'left'), ('金额',11,'right'))}[/]"]
     # Group by bucket
     _ticker_to_bucket: dict = {}
     for bucket, tickers in BUCKET_TICKERS.items():
@@ -706,20 +705,14 @@ def status(ctx: click.Context):
             bucket_total += val_cny
             is_sub = ticker != BUCKET_TICKERS[bucket][0]
             prefix = "  ╰─" if is_sub else "  "
-            unit = ticker_unit(ticker)
-            shares_str = f"{shares:>6.0f}"
-            shares_col = shares_str + unit
-            # CJK pad: target 9 visual width for shares column
-            share_vis = len(shares_str) + display_width(unit)
-            shares_pad = max(0, 9 - share_vis)
             curr = "USD" if ticker not in CNY_TICKERS else "CNY"
-            lines.append(
-                f"{prefix}{ticker_display(ticker):<6} "
-                f"{shares_col}{' ' * shares_pad} "
-                f"{price_str(ticker, p):>10} "
-                f"{curr:<4} "
-                f"¥{val_cny:>10,.0f}"
-            )
+            lines.append(cols(
+                (f"{prefix}{ticker_display(ticker)}", 8, 'left'),
+                (f"{shares:.0f}{ticker_unit(ticker)}", 9, 'right'),
+                (price_str(ticker, p), 10, 'right'),
+                (curr, 4, 'left'),
+                (f"¥{val_cny:>10,.0f}", 11, 'right'),
+            ))
         if bucket_total > 0 and len(BUCKET_TICKERS[bucket]) > 1:
             lines.append(f"  {'─' * 6} {bucket}: ¥{bucket_total:,.0f}")
     lines.append(f"─── 总资产: ¥{V:,.0f}")
