@@ -324,6 +324,35 @@ def pad_right(s: str, width: int) -> str:
     return s + " " * (width - dw)
 
 
+def pad_center(s: str, width: int) -> str:
+    """Center-pad to display width."""
+    dw = display_width(s)
+    if dw >= width:
+        return s
+    left = (width - dw) // 2
+    right = width - dw - left
+    return " " * left + s + " " * right
+
+
+def cols(*specs: Tuple[str, int, str]) -> str:
+    """Format aligned columns with CJK-aware visual widths.
+
+    Each spec: (value, visual_width, align) where align is 'left'/'right'/'center'.
+    Columns are separated by a single space.
+
+    Example: cols(('代码', 8, 'left'), ('100股', 9, 'right'))
+    """
+    parts = []
+    for val, width, align in specs:
+        if align == 'right':
+            parts.append(pad_left(val, width))
+        elif align == 'center':
+            parts.append(pad_center(val, width))
+        else:
+            parts.append(pad_right(val, width))
+    return " ".join(parts)
+
+
 # ── Structured messages ──────────────────────────────────────────────────────
 
 
