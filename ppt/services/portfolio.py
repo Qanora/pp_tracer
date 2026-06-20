@@ -35,7 +35,8 @@ def build_allocation_table(
     ticker_shares: dict, prices: dict, usdcny: float
 ) -> Tuple[list, float]:
     """Build formatted allocation table lines. Returns (lines, total_cny)."""
-    lines = [f"[{Color.fg_muted}]代码     股数     单价        金额[/]"]
+    # Header aligned to data columns (CJK-ware: 2 CJK chars = 4 visual, minus 2 extra per label)
+    lines = [f"[{Color.fg_muted}]{'代码':<7} {'股数':<8} {'单价':<9} {'金额':<9}[/]"]
     total = 0.0
     for ticker, shares in ticker_shares.items():
         if shares <= 0:
