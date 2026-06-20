@@ -252,8 +252,13 @@ def plan(ctx: click.Context, amount: Optional[float]):
         return
 
     # ── Build conversion plan (§4.8, §4.10) ──
+    # Simulate post-DCA holdings so conversion thresholds see the larger
+    # GLDM/SGOV positions after the DCA purchase.
+    post_dca_holdings = dict(holdings)
+    for t, s in dca_plan.items():
+        post_dca_holdings[t] = post_dca_holdings.get(t, 0) + s
     conv_sells, conv_buys, conv_info = build_conversion_trades(
-        holdings, prices, usdcny, cfg
+        post_dca_holdings, prices, usdcny, cfg
     )
 
     # Net merge: cancel overlapping DCA buys with conversion sells
