@@ -375,20 +375,22 @@ def plan(ctx: click.Context, amount: Optional[float]):
 
     # ── Card 4: 执行命令 ──
     exec_lines: list = []
-    # Sell commands
+    # Sell commands (merged into one line)
+    sell_parts: list[str] = []
     for t, s in adjusted_sells.items():
         if s > 0:
-            exec_lines.append(
-                cmd_hint(f"ppt sell {ticker_display(t)}#{int(s)}@"
-                         f"{prices.get(t, 0):.2f}")
-            )
-    # Buy commands
+            sell_parts.append(f"{ticker_display(t)}#{int(s)}@"
+                            f"{prices.get(t, 0):.2f}")
+    if sell_parts:
+        exec_lines.append(cmd_hint(f"ppt sell {' '.join(sell_parts)}"))
+    # Buy commands (merged into one line)
+    buy_parts: list[str] = []
     for t, s in all_buys.items():
         if s > 0:
-            exec_lines.append(
-                cmd_hint(f"ppt buy {ticker_display(t)}#{int(s)}@"
-                         f"{prices.get(t, 0):.2f}")
-            )
+            buy_parts.append(f"{ticker_display(t)}#{int(s)}@"
+                           f"{prices.get(t, 0):.2f}")
+    if buy_parts:
+        exec_lines.append(cmd_hint(f"ppt buy {' '.join(buy_parts)}"))
     if exec_lines:
         panel("执行命令", exec_lines, border=Color.border_info)
     else:

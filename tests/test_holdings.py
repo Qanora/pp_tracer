@@ -3,6 +3,7 @@
 import json
 import uuid
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
 from ppt.holdings import (
@@ -11,6 +12,25 @@ from ppt.holdings import (
     validate_holdings,
     validate_transaction_input,
 )
+
+
+class _FakeBackend:
+    """In-memory storage backend for testing — no ossutil required."""
+
+    def __init__(self):
+        self._store: Dict[str, Any] = {}
+
+    def read(self, path: str) -> Optional[Dict[str, Any]]:
+        data = self._store.get(path)
+        return data if isinstance(data, dict) else None
+
+    def read_list(self, path: str) -> List[Any]:
+        data = self._store.get(path)
+        return data if isinstance(data, list) else []
+
+    def write(self, path: str, data: Any) -> bool:
+        self._store[path] = data
+        return True
 
 
 def _price(stock, bond, gold, cash):
@@ -93,33 +113,8 @@ class TestHoldingsStore:
 
     @staticmethod
     def make_store_with_memory():
-        """Create a HoldingsStore with _oss_read/_oss_write backed by a dict."""
-        store = HoldingsStore()
-        memory: dict = {}
-
-        def fake_oss_read(oss_path):
-            key = oss_path
-            if key in memory:
-                return memory[key]
-            return None
-
-        def fake_oss_read_list(oss_path):
-            key = oss_path
-            if key in memory:
-                val = memory[key]
-                return val if isinstance(val, list) else []
-            return []
-
-        def fake_oss_write(oss_path, data):
-            key = oss_path
-            memory[key] = data
-            return True
-
-        store._oss_read = fake_oss_read
-        store._oss_read_list = fake_oss_read_list
-        store._oss_write = fake_oss_write
-        store._oss_backup = lambda: None  # no-op for tests
-        return store
+        """Create a HoldingsStore with an in-memory fake backend."""
+        return HoldingsStore(backend=_FakeBackend())
 
     def test_save_and_load(self):
         """Round-trip save → load via mocked OSS."""
