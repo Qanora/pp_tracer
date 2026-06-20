@@ -7,6 +7,7 @@ import math
 from typing import Dict, List, Optional, Tuple
 
 from ppt.constants import (
+    A_SHARE_TICKERS,
     BUCKET_TICKERS,
     BUCKETS,
     CNY_TICKERS,
@@ -271,8 +272,12 @@ def _discretize_hamilton(
         if len(tickers) == 1:
             ticker = tickers[0]
         else:
-            # Pick lower market-cap ticker for buy side (§1)
-            if holdings:
+            # Pick non-A-share ticker for direct buy; A-shares are conversion-only.
+            # If both are A-shares (shouldn't happen), fall back to lower-value rule.
+            non_a = [t for t in tickers if t not in A_SHARE_TICKERS]
+            if non_a:
+                ticker = non_a[0]
+            elif holdings:
                 t1, t2 = tickers[0], tickers[1]
                 v1 = holdings.get(t1, 0) * prices.get(t1, 0) * (usdcny if t1 not in CNY_TICKERS else 1)
                 v2 = holdings.get(t2, 0) * prices.get(t2, 0) * (usdcny if t2 not in CNY_TICKERS else 1)
