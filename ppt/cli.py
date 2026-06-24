@@ -347,19 +347,10 @@ def plan(ctx: click.Context, amount: Optional[float]):
     if saved_txns > 0:
         effect_lines.append(kv("节省交易", f"{saved_txns} 笔 (定投与换仓合并)"))
 
-    # Bucket distribution (post-plan)
-    bar_len = 16
-    bucket_bars = []
-    for b in BUCKET_ORDER:
-        bv = after.get("bucket_values", {}).get(b, 0)
-        pct = bv / after["total_value"] if after["total_value"] > 0 else 0.0
-        bars = max(1, round(pct * bar_len))
-        bucket_bars.append(f"{b:<6} {'█' * bars}{'░' * (bar_len - bars)}  {pct:>5.1%}")
-    effect_lines.append(kv("桶分布", "\n".join(bucket_bars)))
-
     # CNY/USD balance
     cur = currency_split(new_holdings, prices, usdcny)
     if cur["total"] > 0:
+        bar_len = 20
         usd_pct = cur["usd"] / cur["total"]
         cny_pct = cur["cny"] / cur["total"]
         usd_bars = max(1, round(usd_pct * bar_len))

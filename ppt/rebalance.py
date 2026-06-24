@@ -272,11 +272,19 @@ def _discretize_hamilton(
         if len(tickers) == 1:
             ticker = tickers[0]
         else:
-            # Pick non-A-share ticker for direct buy; A-shares are conversion-only.
-            # If both are A-shares (shouldn't happen), fall back to lower-value rule.
+            # Pick non-A-share ticker; when multiple, buy the lower-value one
             non_a = [t for t in tickers if t not in A_SHARE_TICKERS]
-            if non_a:
+            if len(non_a) == 1:
                 ticker = non_a[0]
+            elif non_a:
+                # Multiple non-A choices (e.g. stock bucket: SPYM, AVUV)
+                if holdings:
+                    t1, t2 = non_a[0], non_a[1]
+                    v1 = holdings.get(t1, 0) * prices.get(t1, 0) * (usdcny if t1 not in CNY_TICKERS else 1)
+                    v2 = holdings.get(t2, 0) * prices.get(t2, 0) * (usdcny if t2 not in CNY_TICKERS else 1)
+                    ticker = t1 if v1 <= v2 else t2
+                else:
+                    ticker = non_a[0]
             elif holdings:
                 t1, t2 = tickers[0], tickers[1]
                 v1 = holdings.get(t1, 0) * prices.get(t1, 0) * (usdcny if t1 not in CNY_TICKERS else 1)

@@ -115,9 +115,12 @@ def health_check(
     V_SPYM = tv.get("SPYM", 0)
     V_AVUV = tv.get("AVUV", 0)
     if V_SPYM + V_AVUV > 0:
+        # Prices are in USD but V_* are in CNY — convert prices to CNY (§5)
+        p_SPYM_cny = prices.get("SPYM", 0) * usdcny
+        p_AVUV_cny = prices.get("AVUV", 0) * usdcny
         rb = intra_bucket_rebalance(
             V_SPYM=V_SPYM, V_AVUV=V_AVUV,
-            p_SPYM=prices.get("SPYM", 0), p_AVUV=prices.get("AVUV", 0),
+            p_SPYM=p_SPYM_cny, p_AVUV=p_AVUV_cny,
             max_holdings=state["holdings"],
         )
         if rb["triggered"]:
