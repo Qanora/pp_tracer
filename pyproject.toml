@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "永久投资组合辅助工具 — 主动优化的计划器 + 记账本"
 requires-python = ">=3.8"
 dependencies = [
-    "yfinance>=0.2.40",
+    "yfinance>=1.5.1",
     "pandas>=2.0",
     "numpy>=1.24",
     "rich>=13.0",
