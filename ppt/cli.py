@@ -17,7 +17,6 @@ from ppt.constants import (
     BUCKET_TICKERS,
     BUCKETS,
     CNY_TICKERS,
-    EPSILON,
     PRIMARY_TICKER,
     TICKER_CURRENCY,
     TICKER_WHITELIST,
@@ -783,8 +782,8 @@ def status(ctx: click.Context):
             f"[{Color.fg_muted}]─[/]"
         )
         base_corridor = f"[{L:.0%}, {U:.0%}]"
-        # Show adjusted corridor only when trend shifts boundaries
-        if abs(L_adj - L) > EPSILON or abs(U_adj - U) > EPSILON:
+        # Show adjusted corridor only when rendered boundaries differ
+        if f"{L_adj:.0%}" != f"{L:.0%}" or f"{U_adj:.0%}" != f"{U:.0%}":
             adjusted = f"[{Color.fg_muted}]→ [{L_adj:.0%}, {U_adj:.0%}][/]"
         else:
             adjusted = ""

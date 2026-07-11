@@ -209,7 +209,7 @@ def progress_bar(
 
     dev = actual - target
     if abs(dev) < 0.005:
-        tail = "  —  "
+        tail = " +0.0%"
     elif dev > 0:
         tail = f" {dev:+.1%} ↑"
     else:

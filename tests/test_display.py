@@ -69,7 +69,7 @@ class TestProgressBar:
     def test_at_target(self):
         bar = progress_bar(0.25, 0.25, L=0.10, U=0.40)
         assert "│" in bar
-        assert "—" in bar
+        assert "+0.0%" in bar
 
     def test_over_target(self):
         bar = progress_bar(0.35, 0.25, L=0.10, U=0.40)
