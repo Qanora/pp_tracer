@@ -1,3 +1,4 @@
+<!-- flywheel:begin -->
 # ppt 开发指引
 
 ## 项目
@@ -23,3 +24,4 @@ ruff check .
 ## Flywheel
 
 使用本机已安装的 Flywheel：需求 `/fwp-plan <需求>`，缺陷 `/fwp-debug <问题>`，检查 `/fwp-inspect`，恢复 `/fwp-resume`。`fwp-ship` 负责分支/PR/CI，`fwp-build` 只负责实现和本地验证。遵守本仓库现有规则与授权；GitHub Issue/PR 为交付真值。
+<!-- flywheel:end -->
