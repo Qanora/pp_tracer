@@ -45,7 +45,9 @@ class OssBackend:
         try:
             result = subprocess.run(
                 [self.ossutil, "cat", oss_path],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             if result.returncode != 0:
                 logger.warning("ossutil cat %s failed: %s", oss_path, result.stderr.strip())
@@ -63,7 +65,9 @@ class OssBackend:
         try:
             result = subprocess.run(
                 [self.ossutil, "cat", oss_path],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             if result.returncode != 0:
                 logger.debug("ossutil cat %s failed: %s", oss_path, result.stderr.strip())
@@ -89,7 +93,9 @@ class OssBackend:
             )
             result = subprocess.run(
                 [self.ossutil, "cp", tmp_path_str, oss_path, "-f"],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True,
+                text=True,
+                timeout=30,
             )
             if result.returncode != 0:
                 logger.error("ossutil cp %s failed: %s", oss_path, result.stderr.strip())

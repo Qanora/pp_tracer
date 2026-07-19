@@ -8,10 +8,7 @@ from typing import Any, Dict, Optional
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "rebalance": {
-        "target": 0.25,
         "tolerance": 0.005,
-        "upper_limit": 0.35,
-        "lower_limit": 0.15,
     },
     "conversion": {
         "gldm_shares": 1000,
@@ -27,8 +24,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "gap_elasticity": 1.5,
         "corridor_k": 2.5,
         "trend_sensitivity": 0.5,
-        "trend_short_window": 10,
-        "trend_long_window": 20,
         "rp_weight_cap": 0.40,
         "rp_weight_floor": 0.10,
     },
@@ -39,7 +34,9 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
     """Recursively merge override into base; missing keys filled from base."""
     result = deepcopy(base)
     for key, value in override.items():
-        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+        if key not in result:
+            continue
+        if isinstance(result[key], dict) and isinstance(value, dict):
             result[key] = _deep_merge(result[key], value)
         else:
             result[key] = value

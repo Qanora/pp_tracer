@@ -174,14 +174,18 @@ def bucket_correlation(
         return None
 
     n = min(len(prices_a), len(prices_b)) - 1
-    arr_a = np.asarray(prices_a[-n - 1:], dtype=np.float64)
-    arr_b = np.asarray(prices_b[-n - 1:], dtype=np.float64)
+    arr_a = np.asarray(prices_a[-n - 1 :], dtype=np.float64)
+    arr_b = np.asarray(prices_b[-n - 1 :], dtype=np.float64)
     ret_a = np.diff(arr_a) / arr_a[:-1]
     ret_b = np.diff(arr_b) / arr_b[:-1]
 
     # Guard: NaN/Inf returns → reject early
-    if np.any(np.isnan(ret_a)) or np.any(np.isinf(ret_a)) or \
-       np.any(np.isnan(ret_b)) or np.any(np.isinf(ret_b)):
+    if (
+        np.any(np.isnan(ret_a))
+        or np.any(np.isinf(ret_a))
+        or np.any(np.isnan(ret_b))
+        or np.any(np.isinf(ret_b))
+    ):
         return None
 
     if np.std(ret_a) < EPSILON or np.std(ret_b) < EPSILON:

@@ -2,13 +2,20 @@
 
 import subprocess
 import sys
+from unittest.mock import patch
+
+from click.testing import CliRunner
+
+from ppt.cli import main
 
 
 def cli(*args):
     """Run ppt CLI and return CompletedProcess."""
     return subprocess.run(
         [sys.executable, "-m", "ppt"] + list(args),
-        capture_output=True, text=True, timeout=10,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
 
 
@@ -82,3 +89,75 @@ class TestCLIStatusWithoutInit:
     def test_plan_no_data(self):
         r = cli("--offline", "plan", "10000")
         assert r.returncode in (0, 1)
+
+
+class _MemoryStore:
+    def __init__(self):
+        self.state = {
+            "holdings": {
+                "SPYM": 100.0,
+                "AVUV": 0.0,
+                "VGIT": 0.0,
+                "GLDM": 0.0,
+                "518880.SS": 0.0,
+                "SGOV": 0.0,
+                "511360.SS": 0.0,
+            },
+            "cash_in": 10000.0,
+            "cash_out": 0.0,
+            "transactions": [],
+            "created_at": "2025-01-01",
+        }
+
+    def load(self):
+        return self.state
+
+    def load_price_history(self):
+        return []
+
+    def add_transaction(self, txn):
+        record = txn.to_dict()
+        for trade in record["trades"]:
+            ticker = trade["ticker"]
+            delta = trade["shares"] if record["type"] == "buy" else -trade["shares"]
+            self.state["holdings"][ticker] += delta
+        self.state["transactions"].append(record)
+
+
+class TestCLIRebalance:
+    def test_full_rebalance_records_internal_transactions_without_cash_flow(self):
+        store = _MemoryStore()
+        prices = {
+            "SPYM": 100.0,
+            "AVUV": 100.0,
+            "VGIT": 100.0,
+            "GLDM": 100.0,
+            "518880.SS": 5.0,
+            "SGOV": 100.0,
+            "511360.SS": 1.0,
+        }
+        runner = CliRunner()
+
+        with patch("ppt.cli.HoldingsStore", return_value=store), patch(
+            "ppt.cli.fetch_prices", return_value={"prices": prices, "usdcny": 1.0}
+        ):
+            result = runner.invoke(main, ["--yes", "rebalance", "--full"])
+
+        assert result.exit_code == 0, result.output
+        assert store.state["transactions"]
+        assert all(txn["internal"] is True for txn in store.state["transactions"])
+        assert store.state["cash_in"] == 10000.0
+        assert store.state["cash_out"] == 0.0
+        sells = sum(
+            trade["shares"] * trade["price"]
+            for txn in store.state["transactions"]
+            if txn["type"] == "sell"
+            for trade in txn["trades"]
+        )
+        buys = sum(
+            trade["shares"] * trade["price"]
+            for txn in store.state["transactions"]
+            if txn["type"] == "buy"
+            for trade in txn["trades"]
+        )
+        assert buys <= sells

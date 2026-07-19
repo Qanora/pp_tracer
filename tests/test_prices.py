@@ -88,22 +88,28 @@ class TestPriceCache:
         path = self.temp_cache_path()
         cache = PriceCache(path=path, ttl=1)
         # Write manually to bypass save()'s timestamp override
-        path.write_text(json.dumps({
-            "timestamp": "2020-01-01 00:00:00",
-            "prices": {"SPYM": 72.5},
-            "usdcny": 7.25,
-        }))
+        path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2020-01-01 00:00:00",
+                    "prices": {"SPYM": 72.5},
+                    "usdcny": 7.25,
+                }
+            )
+        )
         assert cache.is_fresh() is False
 
     def test_fresh(self):
         """Cache within TTL → is_fresh returns True."""
         path = self.temp_cache_path()
         cache = PriceCache(path=path, ttl=99999)
-        cache.save({
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "prices": {"SPYM": 72.5},
-            "usdcny": 7.25,
-        })
+        cache.save(
+            {
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "prices": {"SPYM": 72.5},
+                "usdcny": 7.25,
+            }
+        )
         assert cache.is_fresh() is True
 
     def test_empty_cache_not_fresh(self):
@@ -122,13 +128,21 @@ class TestPriceFetcher:
         with tempfile.TemporaryDirectory() as tmp:
             cache_path = Path(tmp) / "price_cache.json"
             cache = PriceCache(path=cache_path, ttl=99999)
-            cache.save({
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "prices": {"SPYM": 72.5, "VGIT": 58.92, "AVUV": 120.0,
-                           "GLDM": 30.0, "SGOV": 100.0,
-                           "518880.SS": 5.50, "511360.SS": 100.0},
-                "usdcny": 7.25,
-            })
+            cache.save(
+                {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "prices": {
+                        "SPYM": 72.5,
+                        "VGIT": 58.92,
+                        "AVUV": 120.0,
+                        "GLDM": 30.0,
+                        "SGOV": 100.0,
+                        "518880.SS": 5.50,
+                        "511360.SS": 100.0,
+                    },
+                    "usdcny": 7.25,
+                }
+            )
 
             fetcher = PriceFetcher(cache=cache)
             mock_download = MagicMock()

@@ -1,7 +1,5 @@
 """Tests for display system (§7.2)."""
 
-
-
 from ppt.display import (
     Color,
     cmd_hint,
@@ -27,9 +25,20 @@ from ppt.display import (
 class TestColorTokens:
     def test_all_present(self):
         for attr in [
-            "fg_strong", "fg_default", "fg_muted", "fg_dim",
-            "accent", "profit", "loss", "warn", "info",
-            "border_dim", "border_ok", "border_warn", "border_crit", "border_info",
+            "fg_strong",
+            "fg_default",
+            "fg_muted",
+            "fg_dim",
+            "accent",
+            "profit",
+            "loss",
+            "warn",
+            "info",
+            "border_dim",
+            "border_ok",
+            "border_warn",
+            "border_crit",
+            "border_info",
         ]:
             assert hasattr(Color, attr)
 

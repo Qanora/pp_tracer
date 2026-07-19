@@ -1,10 +1,7 @@
 """Tests for holdings I/O (§2) — OSS-only storage."""
 
-import json
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional
-from unittest.mock import patch
 
 from ppt.holdings import (
     HoldingsStore,
@@ -84,13 +81,15 @@ class TestValidateHoldings:
     """Full holdings state validation."""
 
     def test_valid_state(self):
-        result = validate_holdings({
-            "holdings": {"SPYM": 30, "VGIT": 50},
-            "cash_in": 100000.0,
-            "cash_out": 0.0,
-            "transactions": [],
-            "created_at": "2025-01-01",
-        })
+        result = validate_holdings(
+            {
+                "holdings": {"SPYM": 30, "VGIT": 50},
+                "cash_in": 100000.0,
+                "cash_out": 0.0,
+                "transactions": [],
+                "created_at": "2025-01-01",
+            }
+        )
         assert result is True
 
     def test_missing_field(self):
@@ -98,10 +97,15 @@ class TestValidateHoldings:
         assert result is False
 
     def test_negative_cash(self):
-        result = validate_holdings({
-            "holdings": {}, "cash_in": -100.0, "cash_out": 0.0,
-            "transactions": [], "created_at": "2025-01-01",
-        })
+        result = validate_holdings(
+            {
+                "holdings": {},
+                "cash_in": -100.0,
+                "cash_out": 0.0,
+                "transactions": [],
+                "created_at": "2025-01-01",
+            }
+        )
         assert result is False
 
 
@@ -141,13 +145,15 @@ class TestHoldingsStore:
         """Adding a transaction updates holdings."""
         store = self.make_store_with_memory()
         tickers = ["SPYM", "AVUV", "VGIT", "GLDM", "518880.SS", "SGOV", "511360.SS"]
-        store.save({
-            "holdings": {t: 0.0 for t in tickers},
-            "cash_in": 0.0,
-            "cash_out": 0.0,
-            "transactions": [],
-            "created_at": "2025-01-01",
-        })
+        store.save(
+            {
+                "holdings": {t: 0.0 for t in tickers},
+                "cash_in": 0.0,
+                "cash_out": 0.0,
+                "transactions": [],
+                "created_at": "2025-01-01",
+            }
+        )
         txn = Transaction(
             txn_id=str(uuid.uuid4()),
             date="2025-06-19",
@@ -160,17 +166,54 @@ class TestHoldingsStore:
         assert state is not None
         assert state["holdings"]["SPYM"] == 10.0
 
+    def test_internal_transaction_does_not_change_external_cash_flow(self):
+        store = self.make_store_with_memory()
+        store.save(
+            {
+                "holdings": {"SPYM": 10.0},
+                "cash_in": 1000.0,
+                "cash_out": 0.0,
+                "transactions": [],
+                "created_at": "2025-01-01",
+            }
+        )
+        txn = Transaction(
+            txn_id=str(uuid.uuid4()),
+            date="2025-06-19",
+            txn_type="sell",
+            trades=[{"ticker": "SPYM", "shares": 2, "price": 72.50, "currency": "USD"}],
+            usdcny=7.25,
+            internal=True,
+        )
+
+        store.add_transaction(txn)
+        state = store.load()
+
+        assert state["holdings"]["SPYM"] == 8.0
+        assert state["cash_in"] == 1000.0
+        assert state["cash_out"] == 0.0
+        assert state["transactions"][-1]["internal"] is True
+
     def test_undo_last_transaction(self):
         """Undo reverts the last transaction."""
         store = self.make_store_with_memory()
-        store.save({
-            "holdings": {"SPYM": 10.0, "AVUV": 0, "VGIT": 20.0, "GLDM": 0,
-                         "518880.SS": 0, "SGOV": 50.0, "511360.SS": 0},
-            "cash_in": 50000.0,
-            "cash_out": 0.0,
-            "transactions": [],
-            "created_at": "2025-01-01",
-        })
+        store.save(
+            {
+                "holdings": {
+                    "SPYM": 10.0,
+                    "AVUV": 0,
+                    "VGIT": 20.0,
+                    "GLDM": 0,
+                    "518880.SS": 0,
+                    "SGOV": 50.0,
+                    "511360.SS": 0,
+                },
+                "cash_in": 50000.0,
+                "cash_out": 0.0,
+                "transactions": [],
+                "created_at": "2025-01-01",
+            }
+        )
         txn = Transaction(
             txn_id=str(uuid.uuid4()),
             date="2025-06-19",
@@ -189,22 +232,41 @@ class TestHoldingsStore:
     def test_undo_empty_history(self):
         """Undo with no transactions → no error."""
         store = self.make_store_with_memory()
-        store.save({
-            "holdings": {}, "cash_in": 0, "cash_out": 0,
-            "transactions": [], "created_at": "2025-01-01",
-        })
+        store.save(
+            {
+                "holdings": {},
+                "cash_in": 0,
+                "cash_out": 0,
+                "transactions": [],
+                "created_at": "2025-01-01",
+            }
+        )
         store.undo_last()  # should not raise
 
     def test_undo_clamp_negative(self):
         """Undo that would cause negative holdings → clamp to 0 + warning."""
         store = self.make_store_with_memory()
-        store.save({
-            "holdings": {"SPYM": 0.0, "AVUV": 0, "VGIT": 0, "GLDM": 0,
-                         "518880.SS": 0, "SGOV": 0, "511360.SS": 0},
-            "cash_in": 0, "cash_out": 0, "transactions": [], "created_at": "2025-01-01",
-        })
+        store.save(
+            {
+                "holdings": {
+                    "SPYM": 0.0,
+                    "AVUV": 0,
+                    "VGIT": 0,
+                    "GLDM": 0,
+                    "518880.SS": 0,
+                    "SGOV": 0,
+                    "511360.SS": 0,
+                },
+                "cash_in": 0,
+                "cash_out": 0,
+                "transactions": [],
+                "created_at": "2025-01-01",
+            }
+        )
         txn = Transaction(
-            txn_id=str(uuid.uuid4()), date="2025-06-19", txn_type="buy",
+            txn_id=str(uuid.uuid4()),
+            date="2025-06-19",
+            txn_type="buy",
             trades=[{"ticker": "SPYM", "shares": 10, "price": 72.50, "currency": "USD"}],
             usdcny=7.25,
         )
@@ -234,10 +296,12 @@ class TestHoldingsStore:
         """History trimmed to 120 entries."""
         store = self.make_store_with_memory()
         for i in range(150):
-            store.update_price_history({
-                "date": f"2025-{i % 12 + 1:02d}-{i % 28 + 1:02d}",
-                "prices_cny": {"stock": 500.0, "bond": 400.0, "gold": 200.0, "cash": 700.0},
-            })
+            store.update_price_history(
+                {
+                    "date": f"2025-{i % 12 + 1:02d}-{i % 28 + 1:02d}",
+                    "prices_cny": {"stock": 500.0, "bond": 400.0, "gold": 200.0, "cash": 700.0},
+                }
+            )
         history = store.load_price_history()
         assert len(history) <= 120
 

@@ -1,9 +1,7 @@
 """Holdings I/O (§2) — OSS-only storage, undo, transaction history."""
 
-import json
 import logging
 import math
-import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,11 +77,13 @@ def validate_holdings(data: dict) -> bool:
 @dataclass
 class Transaction:
     """A single buy/sell transaction (§2.1)."""
+
     txn_id: str
     date: str
     txn_type: str  # "buy" | "sell"
     trades: List[Dict[str, Any]]
     usdcny: float
+    internal: bool = False
 
     def to_dict(self) -> dict:
         amount_cny = 0.0
@@ -99,6 +99,7 @@ class Transaction:
             "trades": self.trades,
             "usdcny": self.usdcny,
             "amount_cny": round(amount_cny, 2),
+            "internal": self.internal,
         }
 
 
@@ -125,7 +126,8 @@ class HoldingsStore:
         if isinstance(self.backend, OssBackend):
             subprocess.run(
                 [self.backend.ossutil, "cp", OSS_HOLDINGS_PATH, OSS_BACKUP_PATH, "-f"],
-                capture_output=True, timeout=30,
+                capture_output=True,
+                timeout=30,
             )
 
     # ── Holdings (public API) ─────────────────────────────────────────────
@@ -161,10 +163,11 @@ class HoldingsStore:
             else:
                 state["holdings"][ticker] = state["holdings"].get(ticker, 0.0) - trade["shares"]
 
-        if txn.txn_type == "buy":
-            state["cash_in"] += txn.to_dict()["amount_cny"]
-        else:
-            state["cash_out"] += txn.to_dict()["amount_cny"]
+        if not txn.internal:
+            if txn.txn_type == "buy":
+                state["cash_in"] += txn.to_dict()["amount_cny"]
+            else:
+                state["cash_out"] += txn.to_dict()["amount_cny"]
 
         state["transactions"].append(txn.to_dict())
         self.save(state)
@@ -189,14 +192,16 @@ class HoldingsStore:
             if state["holdings"][ticker] < 0:
                 logger.warning(
                     "Undo clamped %s from %s to 0",
-                    ticker, state["holdings"][ticker],
+                    ticker,
+                    state["holdings"][ticker],
                 )
                 state["holdings"][ticker] = 0.0
 
-        if reverse_type == "sell":
-            state["cash_out"] += last["amount_cny"]
-        else:
-            state["cash_in"] -= last["amount_cny"]
+        if not last.get("internal", False):
+            if reverse_type == "sell":
+                state["cash_out"] += last["amount_cny"]
+            else:
+                state["cash_in"] -= last["amount_cny"]
 
         self.save(state)
         return last
@@ -265,14 +270,15 @@ class HoldingsStore:
         try:
             import yfinance as yf
 
-            from ppt.constants import CNY_TICKERS, PRIMARY_TICKER
             from ppt.constants import BUCKETS as _BUCKETS
+            from ppt.constants import CNY_TICKERS, PRIMARY_TICKER
 
             # Determine earliest date needed
             if history:
                 earliest = history[0]["date"]
             else:
                 from datetime import datetime
+
                 earliest = datetime.now().strftime("%Y-%m-%d")
 
             # Fetch 3 months of daily data for primary tickers + USDCNY
@@ -292,7 +298,11 @@ class HoldingsStore:
 
             # Use iterrows() for cleaner row iteration (avoid repeated iloc lookups)
             for row_date_idx, row_data in close.iterrows():
-                row_date = str(row_date_idx.date()) if hasattr(row_date_idx, "date") else str(row_date_idx)[:10]
+                row_date = (
+                    str(row_date_idx.date())
+                    if hasattr(row_date_idx, "date")
+                    else str(row_date_idx)[:10]
+                )
                 if row_date >= earliest or row_date in existing_dates:
                     continue
 
@@ -317,10 +327,12 @@ class HoldingsStore:
                         entry_cny[b] = val
 
                 if len(entry_cny) == len(_BUCKETS):
-                    history.append({
-                        "date": row_date,
-                        "prices_cny": entry_cny,
-                    })
+                    history.append(
+                        {
+                            "date": row_date,
+                            "prices_cny": entry_cny,
+                        }
+                    )
                     existing_dates.add(row_date)
 
             history.sort(key=lambda x: x["date"])

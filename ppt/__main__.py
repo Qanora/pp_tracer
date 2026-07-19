@@ -8,8 +8,8 @@ Exit codes (§5):
 
 import sys
 
-from ppt.cli import main
 from ppt import ensure_logging
+from ppt.cli import main
 
 if __name__ == "__main__":
     ensure_logging()

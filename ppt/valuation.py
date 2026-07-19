@@ -77,7 +77,7 @@ def currency_split(
 
     Returns: {"usd": usd_total_cny, "cny": cny_total, "total": total}
     """
-    from ppt.constants import CNY_TICKERS, USD_TICKERS
+    from ppt.constants import USD_TICKERS
 
     usd_total = 0.0
     cny_total = 0.0

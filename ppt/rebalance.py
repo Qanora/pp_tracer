@@ -280,15 +280,31 @@ def _discretize_hamilton(
                 # Multiple non-A choices (e.g. stock bucket: SPYM, AVUV)
                 if holdings:
                     t1, t2 = non_a[0], non_a[1]
-                    v1 = holdings.get(t1, 0) * prices.get(t1, 0) * (usdcny if t1 not in CNY_TICKERS else 1)
-                    v2 = holdings.get(t2, 0) * prices.get(t2, 0) * (usdcny if t2 not in CNY_TICKERS else 1)
+                    v1 = (
+                        holdings.get(t1, 0)
+                        * prices.get(t1, 0)
+                        * (usdcny if t1 not in CNY_TICKERS else 1)
+                    )
+                    v2 = (
+                        holdings.get(t2, 0)
+                        * prices.get(t2, 0)
+                        * (usdcny if t2 not in CNY_TICKERS else 1)
+                    )
                     ticker = t1 if v1 <= v2 else t2
                 else:
                     ticker = non_a[0]
             elif holdings:
                 t1, t2 = tickers[0], tickers[1]
-                v1 = holdings.get(t1, 0) * prices.get(t1, 0) * (usdcny if t1 not in CNY_TICKERS else 1)
-                v2 = holdings.get(t2, 0) * prices.get(t2, 0) * (usdcny if t2 not in CNY_TICKERS else 1)
+                v1 = (
+                    holdings.get(t1, 0)
+                    * prices.get(t1, 0)
+                    * (usdcny if t1 not in CNY_TICKERS else 1)
+                )
+                v2 = (
+                    holdings.get(t2, 0)
+                    * prices.get(t2, 0)
+                    * (usdcny if t2 not in CNY_TICKERS else 1)
+                )
                 ticker = t1 if v1 <= v2 else t2
             else:
                 ticker = tickers[0]
@@ -381,9 +397,7 @@ def dca_minimum_plan(
     denom = 1.0 - under_sum_w
     if abs(denom) < EPSILON:
         # All buckets under → degenerate
-        max_gap = max(
-            target_weights[b] * V - bv[b] for b in BUCKETS
-        )
+        max_gap = max(target_weights[b] * V - bv[b] for b in BUCKETS)
         k = len(BUCKETS)
         C = max(max_gap * k / (k - 1), MIN_TRADE_AMOUNT * k)
     else:

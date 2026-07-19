@@ -4,12 +4,16 @@ Extracted from cli.py to reduce God Module size and enable unit testing.
 """
 
 import math
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from ppt.constants import BUCKETS
 from ppt.display import cmd_hint, status_badge, ticker_display
-from ppt.returns import intra_bucket_rebalance
-from ppt.returns import bucket_correlation, conversion_check, stock_bond_reversal
+from ppt.returns import (
+    bucket_correlation,
+    conversion_check,
+    intra_bucket_rebalance,
+    stock_bond_reversal,
+)
 from ppt.valuation import ticker_values_cny
 
 
@@ -43,12 +47,16 @@ def build_conversion_trades(
                 )
                 conversion_sells["GLDM"] = float(sell_shares)
                 conversion_buys["518880.SS"] = buy_shares
-                conversion_info.append({
-                    "bucket": "gold",
-                    "sell": "GLDM", "buy": "518880.SS",
-                    "sell_shares": float(sell_shares), "buy_shares": buy_shares,
-                    "batches": result["batches"],
-                })
+                conversion_info.append(
+                    {
+                        "bucket": "gold",
+                        "sell": "GLDM",
+                        "buy": "518880.SS",
+                        "sell_shares": float(sell_shares),
+                        "buy_shares": buy_shares,
+                        "batches": result["batches"],
+                    }
+                )
 
     # SGOV → 511360.SS
     sgov_val = tv.get("SGOV", 0)
@@ -66,12 +74,16 @@ def build_conversion_trades(
                 )
                 conversion_sells["SGOV"] = float(sell_shares)
                 conversion_buys["511360.SS"] = buy_shares
-                conversion_info.append({
-                    "bucket": "cash",
-                    "sell": "SGOV", "buy": "511360.SS",
-                    "sell_shares": float(sell_shares), "buy_shares": buy_shares,
-                    "batches": result["batches"],
-                })
+                conversion_info.append(
+                    {
+                        "bucket": "cash",
+                        "sell": "SGOV",
+                        "buy": "511360.SS",
+                        "sell_shares": float(sell_shares),
+                        "buy_shares": buy_shares,
+                        "batches": result["batches"],
+                    }
+                )
 
     return conversion_sells, conversion_buys, conversion_info
 
@@ -93,43 +105,51 @@ def health_check(
     gldm_val = tv.get("GLDM", 0)
     result = conversion_check("GLDM", gldm_val, prices.get("518880.SS", 5.50), 1000)
     if result["triggered"]:
-        alerts.append((
-            2,
-            f"{status_badge('info')} 黄金换仓: GLDM → 518880 "
-            f"({result['batches']} 批, ¥{result['threshold_cny']:,.0f} 触发线)"
-            f"\n  {cmd_hint(f'ppt sell GLDM + ppt buy 518880')}"
-        ))
+        alerts.append(
+            (
+                2,
+                f"{status_badge('info')} 黄金换仓: GLDM → 518880 "
+                f"({result['batches']} 批, ¥{result['threshold_cny']:,.0f} 触发线)"
+                f"\n  {cmd_hint('ppt sell GLDM + ppt buy 518880')}",
+            )
+        )
 
     # Check SGOV → 511360
     sgov_val = tv.get("SGOV", 0)
     result = conversion_check("SGOV", sgov_val, prices.get("511360.SS", 100), 100)
     if result["triggered"]:
-        alerts.append((
-            2,
-            f"{status_badge('info')} 现金换仓: SGOV → 511360 "
-            f"({result['batches']} 批, ¥{result['threshold_cny']:,.0f} 触发线)"
-            f"\n  {cmd_hint(f'ppt sell SGOV + ppt buy 511360')}"
-        ))
+        alerts.append(
+            (
+                2,
+                f"{status_badge('info')} 现金换仓: SGOV → 511360 "
+                f"({result['batches']} 批, ¥{result['threshold_cny']:,.0f} 触发线)"
+                f"\n  {cmd_hint('ppt sell SGOV + ppt buy 511360')}",
+            )
+        )
 
     # Intra-bucket rebalance
-    V_SPYM = tv.get("SPYM", 0)
-    V_AVUV = tv.get("AVUV", 0)
-    if V_SPYM + V_AVUV > 0:
+    v_spym = tv.get("SPYM", 0)
+    v_avuv = tv.get("AVUV", 0)
+    if v_spym + v_avuv > 0:
         # Prices are in USD but V_* are in CNY — convert prices to CNY (§5)
-        p_SPYM_cny = prices.get("SPYM", 0) * usdcny
-        p_AVUV_cny = prices.get("AVUV", 0) * usdcny
+        p_spym_cny = prices.get("SPYM", 0) * usdcny
+        p_avuv_cny = prices.get("AVUV", 0) * usdcny
         rb = intra_bucket_rebalance(
-            V_SPYM=V_SPYM, V_AVUV=V_AVUV,
-            p_SPYM=p_SPYM_cny, p_AVUV=p_AVUV_cny,
+            V_SPYM=v_spym,
+            V_AVUV=v_avuv,
+            p_SPYM=p_spym_cny,
+            p_AVUV=p_avuv_cny,
             max_holdings=state["holdings"],
         )
         if rb["triggered"]:
-            alerts.append((
-                1,
-                f"{status_badge('warn')} 桶内再均衡: "
-                f"卖 {ticker_display(rb['sell_ticker'])} {rb['sell_shares']:.0f}股"
-                f" → 买 {ticker_display(rb['buy_ticker'])} {rb['buy_shares']:.0f}股"
-            ))
+            alerts.append(
+                (
+                    1,
+                    f"{status_badge('warn')} 桶内再均衡: "
+                    f"卖 {ticker_display(rb['sell_ticker'])} {rb['sell_shares']:.0f}股"
+                    f" → 买 {ticker_display(rb['buy_ticker'])} {rb['buy_shares']:.0f}股",
+                )
+            )
 
     # Correlation checks (§4.12)
     if prices_by_bucket and price_history:
@@ -139,20 +159,16 @@ def health_check(
                 b1, b2 = bucket_list[i], bucket_list[j]
                 rho = bucket_correlation(prices_by_bucket[b1], prices_by_bucket[b2])
                 if rho is not None and abs(rho) > 0.7:
-                    alerts.append((
-                        1,
-                        f"{status_badge('warn')} {b1}-{b2} 相关性过高: ρ={rho:+.2f}"
-                    ))
+                    alerts.append((1, f"{status_badge('warn')} {b1}-{b2} 相关性过高: ρ={rho:+.2f}"))
 
         # Stock-bond reversal
-        reversal = stock_bond_reversal(
-            prices_by_bucket["stock"], prices_by_bucket["bond"]
-        )
+        reversal = stock_bond_reversal(prices_by_bucket["stock"], prices_by_bucket["bond"])
         if reversal["reversal"]:
-            alerts.append((
-                0,
-                f"{status_badge('crit')} 股债相关性反转: ρ前={reversal['rho_first']:+.2f} → ρ後={reversal['rho_second']:+.2f}"
-            ))
+            reversal_msg = (
+                f"{status_badge('crit')} 股债相关性反转: "
+                f"ρ前={reversal['rho_first']:+.2f} → ρ後={reversal['rho_second']:+.2f}"
+            )
+            alerts.append((0, reversal_msg))
 
     # Sort by severity (0=crit first, 1=warn, 2=info last)
     alerts.sort(key=lambda x: x[0])

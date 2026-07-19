@@ -243,10 +243,7 @@ def dev_change(old_dev: float, new_dev: float) -> str:
     """Deviation change display: 12.3% → 8.1% ↓."""
     arrow = "↓" if abs(new_dev) < abs(old_dev) else "↑"
     style = Color.profit if abs(new_dev) < abs(old_dev) else Color.loss
-    return (
-        f"[{Color.fg_muted}]{abs(old_dev):.1%} → {abs(new_dev):.1%}[/] "
-        f"[{style}]{arrow}[/]"
-    )
+    return f"[{Color.fg_muted}]{abs(old_dev):.1%} → {abs(new_dev):.1%}[/] [{style}]{arrow}[/]"
 
 
 # ── Mini trend ───────────────────────────────────────────────────────────────
@@ -296,12 +293,14 @@ def display_width(s: str) -> int:
     """Calculate display width (CJK chars = 2 cols)."""
     w = 0
     for ch in s:
-        if "ᄀ" <= ch <= "ᅟ" or \
-           "⺀" <= ch <= "｠" or \
-           "￠" <= ch <= "￦" or \
-           "　" <= ch <= "〿" or \
-           "！" <= ch <= "｠" or \
-           "￠" <= ch <= "￦":
+        if (
+            "ᄀ" <= ch <= "ᅟ"
+            or "⺀" <= ch <= "｠"
+            or "￠" <= ch <= "￦"
+            or "　" <= ch <= "〿"
+            or "！" <= ch <= "｠"
+            or "￠" <= ch <= "￦"
+        ):
             w += 2
         else:
             w += 1
@@ -344,9 +343,9 @@ def cols(*specs: Tuple[str, int, str]) -> str:
     """
     parts = []
     for val, width, align in specs:
-        if align == 'right':
+        if align == "right":
             parts.append(pad_left(val, width))
-        elif align == 'center':
+        elif align == "center":
             parts.append(pad_center(val, width))
         else:
             parts.append(pad_right(val, width))

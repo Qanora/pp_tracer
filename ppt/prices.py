@@ -35,9 +35,7 @@ class PriceValidator:
 
         # Check usdcny range (warning, not blocking)
         if not (cls.USDCNY_MIN <= usdcny <= cls.USDCNY_MAX):
-            errors.append(
-                f"[PRICE] usdcny={usdcny} outside [{cls.USDCNY_MIN}, {cls.USDCNY_MAX}]"
-            )
+            errors.append(f"[PRICE] usdcny={usdcny} outside [{cls.USDCNY_MIN}, {cls.USDCNY_MAX}]")
 
         # Check all prices > 0 (blocking error)
         for ticker, price in prices.items():
@@ -167,9 +165,7 @@ class PriceFetcher:
             else:
                 logger.warning(e)
         if blocking:
-            raise RuntimeError(
-                "价格校验失败: " + "; ".join(blocking)
-            )
+            raise RuntimeError("价格校验失败: " + "; ".join(blocking))
 
         # Save to cache
         data = {
@@ -254,7 +250,11 @@ class PriceFetcher:
                     col_name = col[1] if isinstance(col, tuple) else col
                     series = close[col] if hasattr(close[col], "iloc") else close[col]
                     # Use last non-NaN value (yfinance may return NaN for today)
-                    val = float(series.dropna().iloc[-1]) if hasattr(series, "dropna") else float(series)
+                    val = (
+                        float(series.dropna().iloc[-1])
+                        if hasattr(series, "dropna")
+                        else float(series)
+                    )
                     if col_name == "CNY=X":
                         usdcny = val
                     else:
@@ -276,14 +276,21 @@ class PriceFetcher:
                         for col in close.columns:
                             col_name = col[1] if isinstance(col, tuple) else col
                             series = close[col] if hasattr(close[col], "iloc") else close[col]
-                            val = float(series.dropna().iloc[-1]) if hasattr(series, "dropna") else float(series)
+                            val = (
+                                float(series.dropna().iloc[-1])
+                                if hasattr(series, "dropna")
+                                else float(series)
+                            )
                             if col_name == "CNY=X":
                                 usdcny = val
                             else:
                                 prices[col_name] = val
             except Exception as e:
                 logger.warning(
-                    f"Adj Close fallback parse failed for ticker={single_ticker}: {type(e).__name__}: {e}"
+                    "Adj Close fallback parse failed for ticker=%s: %s: %s",
+                    single_ticker,
+                    type(e).__name__,
+                    e,
                 )
 
         return (prices, usdcny)

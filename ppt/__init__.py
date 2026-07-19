@@ -4,7 +4,6 @@ import logging
 import os
 from pathlib import Path
 
-
 _logging_configured = False
 
 

@@ -10,9 +10,6 @@ from ppt.config import DEFAULT_CONFIG, Config
 class TestConfigDefaults:
     """Default config values match README §6."""
 
-    def test_target_weight(self):
-        assert DEFAULT_CONFIG["rebalance"]["target"] == 0.25
-
     def test_tolerance(self):
         assert DEFAULT_CONFIG["rebalance"]["tolerance"] == 0.005
 
@@ -41,7 +38,7 @@ class TestConfig:
     def test_load_with_defaults(self):
         """Loading nonexistent file returns defaults."""
         cfg = Config.from_file(Path("/nonexistent/pp_config.json"))
-        assert cfg.data["rebalance"]["target"] == 0.25
+        assert cfg.data["rebalance"]["tolerance"] == 0.005
 
     def test_save_and_load(self):
         """Round-trip save → load preserves data."""
@@ -56,10 +53,18 @@ class TestConfig:
         """Missing keys are filled with defaults on load."""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pp_config.json"
-            path.write_text(json.dumps({"rebalance": {"target": 0.30}}))
+            path.write_text(json.dumps({"rebalance": {"tolerance": 0.01}}))
             loaded = Config.from_file(path)
             # Provided key preserved
-            assert loaded.data["rebalance"]["target"] == 0.30
+            assert loaded.data["rebalance"]["tolerance"] == 0.01
             # Missing keys filled from defaults
-            assert loaded.data["rebalance"]["tolerance"] == 0.005
             assert loaded.data["advanced"]["weighting_mode"] == "equal"
+
+    def test_removed_keys_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "pp_config.json"
+            path.write_text(json.dumps({"rebalance": {"target": 0.30}}))
+
+            loaded = Config.from_file(path)
+
+            assert "target" not in loaded.data["rebalance"]

@@ -20,6 +20,7 @@ from ppt.valuation import (
 
 # ── §4.1 权重计算 ────────────────────────────────────────────────────────────
 
+
 class TestTickerValuesCNY:
     """ticker → CNY value mapping."""
 
@@ -93,6 +94,7 @@ class TestTotalValue:
 
 # ── §4.2 目标权重 ────────────────────────────────────────────────────────────
 
+
 class TestEqualTarget:
     def test_all_quarters(self):
         w = equal_target_weights()
@@ -126,6 +128,7 @@ class TestRiskParity:
 
 
 # ── §4.3 波动率估计 ──────────────────────────────────────────────────────────
+
 
 class TestVolatility:
     """60-day rolling annualized volatility."""
@@ -164,6 +167,7 @@ class TestVolatility:
 
 # ── §4.4 自适应走廊 ──────────────────────────────────────────────────────────
 
+
 class TestCorridor:
     def test_basic_bounds(self):
         """h = max(k * sigma / sqrt(12), hmin)."""
@@ -195,6 +199,7 @@ class TestCorridor:
 
 # ── §4.5 趋势信号 ────────────────────────────────────────────────────────────
 
+
 class TestTrendSignal:
     def test_neutral_when_flat(self):
         """Flat prices → trend ≈ 0."""
@@ -225,7 +230,11 @@ class TestTrendAdjustedCorridor:
     def test_weak_bucket_raises_upper(self):
         """Trend < 0 → upper bound moves up (delay selling)."""
         L, U = trend_adjusted_corridor(
-            w_star=0.25, sigma=0.12, trend=-0.05, k=2.5, lam=0.5,
+            w_star=0.25,
+            sigma=0.12,
+            trend=-0.05,
+            k=2.5,
+            lam=0.5,
         )
         base_L, base_U = corridor_bounds(0.25, 0.12, 2.5)
         assert U > base_U  # upper relaxed
@@ -234,7 +243,11 @@ class TestTrendAdjustedCorridor:
     def test_strong_bucket_lowers_floor(self):
         """Trend > 0 → lower bound moves down (delay buying)."""
         L, U = trend_adjusted_corridor(
-            w_star=0.25, sigma=0.12, trend=0.05, k=2.5, lam=0.5,
+            w_star=0.25,
+            sigma=0.12,
+            trend=0.05,
+            k=2.5,
+            lam=0.5,
         )
         base_L, base_U = corridor_bounds(0.25, 0.12, 2.5)
         assert L < base_L  # lower relaxed
@@ -243,7 +256,11 @@ class TestTrendAdjustedCorridor:
     def test_neutral_trend_unchanged(self):
         """Trend = 0 → no adjustment."""
         L, U = trend_adjusted_corridor(
-            w_star=0.25, sigma=0.12, trend=0.0, k=2.5, lam=0.5,
+            w_star=0.25,
+            sigma=0.12,
+            trend=0.0,
+            k=2.5,
+            lam=0.5,
         )
         base_L, base_U = corridor_bounds(0.25, 0.12, 2.5)
         assert L == pytest.approx(base_L)
