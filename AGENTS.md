@@ -1,4 +1,3 @@
-<!-- flywheel:begin -->
 # ppt 开发指引
 
 ## 项目
@@ -21,7 +20,16 @@ ruff check .
 
 需要本地开发安装时：`pip install -e ".[dev]"`。CLI 入口为 `ppt`；实现细节与命令契约见 `README.md`。
 
-## Flywheel
+<!-- flywheel:begin -->
+## Flywheel（Codex）
 
-使用本机已安装的 Flywheel：需求 `/fwp-plan <需求>`，缺陷 `/fwp-debug <问题>`，检查 `/fwp-inspect`，恢复 `/fwp-resume`。`fwp-ship` 负责分支/PR/CI，`fwp-build` 只负责实现和本地验证。遵守本仓库现有规则与授权；GitHub Issue/PR 为交付真值。
+按任务意图选择入口：
+
+- 新需求、方案或明确要求实现：`/fwp-design <需求>`
+- 具体错误、回归或持续集成故障：`/fwp-debug <问题>`
+- 当前质量巡检（会运行项目检查）：`/fwp-inspect`
+- 项目演进自查（宏观审查，不运行项目）：`/fwp-check`
+- 恢复已有议题、拉取请求或中断交付：`/fwp-resume`
+
+只要求报告或方案时，在对应阶段停止；原请求明确要求修复、实现或交付时，才继续进入后续阶段。`fwp-deliver` 是内部交付引擎，不直接调用。远端写操作与合并始终受用户授权和本仓库规则约束。
 <!-- flywheel:end -->
