@@ -6,9 +6,10 @@ IO layer — handles yfinance, local JSON cache, price validation.
 import json
 import logging
 import time
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any
 
 from ppt.constants import YFINANCE_TICKERS
 
@@ -27,11 +28,11 @@ class PriceValidator:
     @classmethod
     def validate(
         cls,
-        prices: Dict[str, float],
+        prices: dict[str, float],
         usdcny: float,
-    ) -> List[str]:
+    ) -> list[str]:
         """Return list of validation errors (empty = all good)."""
-        errors: List[str] = []
+        errors: list[str] = []
 
         # Check usdcny range (warning, not blocking)
         if not (cls.USDCNY_MIN <= usdcny <= cls.USDCNY_MAX):
@@ -88,7 +89,7 @@ class PriceCache:
         except (json.JSONDecodeError, ValueError, KeyError):
             return False
 
-    def load(self) -> Optional[dict]:
+    def load(self) -> dict | None:
         """Load cached data. Returns None if cache is missing/corrupt."""
         if not self.path.exists():
             return None
@@ -118,10 +119,10 @@ class PriceFetcher:
 
     def fetch(
         self,
-        download_fn: Optional[Callable] = None,
+        download_fn: Callable | None = None,
         force: bool = False,
         offline: bool = False,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Fetch current prices for all tickers.
 
         Args:
@@ -177,8 +178,8 @@ class PriceFetcher:
 
     def _download_with_retry(
         self,
-        download_fn: Optional[Callable] = None,
-    ) -> Tuple[Optional[Dict[str, float]], Optional[float]]:
+        download_fn: Callable | None = None,
+    ) -> tuple[dict[str, float] | None, float | None]:
         """Download prices with individual fallback and retry."""
         tickers = list(YFINANCE_TICKERS)
 
@@ -192,7 +193,7 @@ class PriceFetcher:
                 logger.warning(f"Batch download failed: {e}")
 
         # Fallback: individual ticker download
-        all_prices: Dict[str, float] = {}
+        all_prices: dict[str, float] = {}
         for ticker in tickers:
             if download_fn is None:
                 continue
@@ -226,7 +227,7 @@ class PriceFetcher:
         usdcny = all_prices.pop("CNY=X", 7.25)
         return (all_prices, usdcny)
 
-    def _fetch_yfinance(self, tickers: List[str]) -> Tuple[Dict[str, float], float]:
+    def _fetch_yfinance(self, tickers: list[str]) -> tuple[dict[str, float], float]:
         """Real yfinance download."""
         import yfinance as yf
 
@@ -236,10 +237,10 @@ class PriceFetcher:
     def _parse_dataframe(
         self,
         df,
-        single_ticker: Optional[str] = None,
-    ) -> Tuple[Dict[str, float], float]:
+        single_ticker: str | None = None,
+    ) -> tuple[dict[str, float], float]:
         """Extract close prices and USDCNY from yfinance DataFrame."""
-        prices: Dict[str, float] = {}
+        prices: dict[str, float] = {}
         usdcny = 7.25
 
         try:
@@ -300,10 +301,10 @@ class PriceFetcher:
 
 
 def fetch_prices(
-    cache_dir: Optional[Path] = None,
+    cache_dir: Path | None = None,
     force: bool = False,
     offline: bool = False,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Convenience: fetch prices with local cache in ~/.pp/."""
     if cache_dir is None:
         cache_dir = Path.home() / ".pp"

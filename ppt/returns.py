@@ -4,7 +4,6 @@ Pure calculation layer — no IO, no print, no side effects.
 """
 
 import math
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -57,11 +56,11 @@ def conversion_check(
 
 
 def net_conversion_with_dca(
-    dca_plan: Dict[str, float],
-    conversion_sells: Dict[str, float],
-    conversion_buys: Dict[str, float],
-    prices_cny: Dict[str, float],
-) -> Tuple[Dict[str, float], Dict[str, float]]:
+    dca_plan: dict[str, float],
+    conversion_sells: dict[str, float],
+    conversion_buys: dict[str, float],
+    prices_cny: dict[str, float],
+) -> tuple[dict[str, float], dict[str, float]]:
     """Net conversion against DCA plan.
 
     If DCA plan buys the same ticker conversion would sell:
@@ -102,7 +101,7 @@ def intra_bucket_rebalance(
     p_AVUV: float,
     threshold: float = INTRA_BUCKET_THRESHOLD,
     target_ratio: float = INTRA_BUCKET_TARGET,
-    max_holdings: Optional[Dict[str, float]] = None,
+    max_holdings: dict[str, float] | None = None,
 ) -> dict:
     """SPYM ↔ AVUV intra-bucket rebalance.
 
@@ -162,10 +161,10 @@ def intra_bucket_rebalance(
 
 
 def bucket_correlation(
-    prices_a: List[float],
-    prices_b: List[float],
+    prices_a: list[float],
+    prices_b: list[float],
     min_days: int = CORR_MIN_DAYS,
-) -> Optional[float]:
+) -> float | None:
     """Pearson correlation of daily returns between two buckets.
 
     Returns None if < min_days data or either variance is zero.
@@ -199,8 +198,8 @@ def bucket_correlation(
 
 
 def stock_bond_reversal(
-    prices_stock: List[float],
-    prices_bond: List[float],
+    prices_stock: list[float],
+    prices_bond: list[float],
     window: int = 30,
     threshold: float = STOCK_BOND_REVERSAL_THRESHOLD,
 ) -> dict:
@@ -235,18 +234,18 @@ def stock_bond_reversal(
 
 # ── §4.13 收益计算 ───────────────────────────────────────────────────────────
 
-_TICKER_TO_BUCKET: Dict[str, str] = {
+_TICKER_TO_BUCKET: dict[str, str] = {
     t: bucket for bucket, tickers in BUCKET_TICKERS.items() for t in tickers
 }
 
 
-def bucket_net_cost(transactions: List[dict]) -> Dict[str, float]:
+def bucket_net_cost(transactions: list[dict]) -> dict[str, float]:
     """Net cost per bucket from transaction history.
 
     Buy adds cost (+), sell reduces cost (-).
     USD transactions converted at historic usdcny rate.
     """
-    costs: Dict[str, float] = {b: 0.0 for b in BUCKETS}
+    costs: dict[str, float] = {b: 0.0 for b in BUCKETS}
 
     for txn in transactions:
         for trade in txn.get("trades", []):
@@ -271,8 +270,8 @@ def bucket_net_cost(transactions: List[dict]) -> Dict[str, float]:
 
 def total_return(
     V: float,
-    bucket_costs: Dict[str, float],
-) -> Tuple[float, float]:
+    bucket_costs: dict[str, float],
+) -> tuple[float, float]:
     """Total return P&L.
 
     P = V - sum(costs), pct = P / net_cost.
@@ -294,17 +293,17 @@ def cagr(V: float, cost: float, years: float) -> float:
     return (V / cost) ** (1.0 / years) - 1.0
 
 
-def _npv(rate: float, cashflows: List[Tuple[float, float]], durations: List[float]) -> float:
+def _npv(rate: float, cashflows: list[tuple[float, float]], durations: list[float]) -> float:
     """Net present value of cashflows discounted at `rate`."""
     return sum(cf / (1.0 + rate) ** t for (cf, _), t in zip(cashflows, durations))
 
 
 def xirr(
-    cashflows: List[Tuple[float, float]],
+    cashflows: list[tuple[float, float]],
     guess: float = 0.1,
     tol: float = 1e-6,
     max_iter: int = 200,
-) -> Optional[float]:
+) -> float | None:
     """XIRR via Newton iteration.
 
     cashflows: [(amount, day_number)] — negative=investment, positive=return.
@@ -352,10 +351,10 @@ def xirr(
 
 
 def _xirr_bisection(
-    cashflows: List[Tuple[float, float]],
-    durations: List[float],
+    cashflows: list[tuple[float, float]],
+    durations: list[float],
     max_iter: int = 300,
-) -> Optional[float]:
+) -> float | None:
     """Bisection fallback for XIRR."""
 
     lo, hi = -0.99, 10.0

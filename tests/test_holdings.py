@@ -1,7 +1,7 @@
 """Tests for holdings I/O (§2) — OSS-only storage."""
 
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ppt.holdings import (
     HoldingsStore,
@@ -15,13 +15,13 @@ class _FakeBackend:
     """In-memory storage backend for testing — no ossutil required."""
 
     def __init__(self):
-        self._store: Dict[str, Any] = {}
+        self._store: dict[str, Any] = {}
 
-    def read(self, path: str) -> Optional[Dict[str, Any]]:
+    def read(self, path: str) -> dict[str, Any] | None:
         data = self._store.get(path)
         return data if isinstance(data, dict) else None
 
-    def read_list(self, path: str) -> List[Any]:
+    def read_list(self, path: str) -> list[Any]:
         data = self._store.get(path)
         return data if isinstance(data, list) else []
 

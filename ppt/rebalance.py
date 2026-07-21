@@ -4,7 +4,6 @@ Pure calculation layer — no IO, no print, no side effects.
 """
 
 import math
-from typing import Dict, List, Optional, Tuple
 
 from ppt.constants import (
     A_SHARE_TICKERS,
@@ -26,7 +25,7 @@ def single_over_rebalance(
     w_star: float,
     V: float,
     price: float,
-    max_shares: Optional[float] = None,
+    max_shares: float | None = None,
 ) -> float:
     """Single overweight bucket analytic solution.
 
@@ -51,9 +50,9 @@ def single_over_rebalance(
 
 
 def multi_over_rebalance(
-    over: Dict[str, Dict[str, float]],
+    over: dict[str, dict[str, float]],
     V: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Multi-bucket simultaneous over-rebalance (simultaneous equations).
 
     over: {bucket: {V_b, w_star, price}}
@@ -71,7 +70,7 @@ def multi_over_rebalance(
 
     # Degenerate: all buckets over
     if abs(1.0 - sum_w) < EPSILON:
-        result: Dict[str, float] = {}
+        result: dict[str, float] = {}
         for b, data in over.items():
             s = single_over_rebalance(data["V_b"], data["w_star"], V, data["price"])
             if s > 0:
@@ -93,9 +92,9 @@ def multi_over_rebalance(
 
 
 def multi_under_rebalance(
-    under: Dict[str, Dict[str, float]],
+    under: dict[str, dict[str, float]],
     V: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Multi-bucket simultaneous under-rebalance.
 
     under: {bucket: {V_b, w_star, price}}
@@ -134,7 +133,7 @@ def dca_allocate(
     tolerance: float = 0.005,
     elasticity: float = 1.5,
     min_trade: float = MIN_TRADE_AMOUNT,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Incremental DCA allocation.
 
     1. Gap identification: only buckets with gap > tolerance * (V+C)
@@ -145,10 +144,10 @@ def dca_allocate(
 
     Returns: {ticker: shares} (already discretized to lot sizes)
     """
-    holdings: Dict[str, float] = state["holdings"]
-    prices: Dict[str, float] = state["prices"]
+    holdings: dict[str, float] = state["holdings"]
+    prices: dict[str, float] = state["prices"]
     usdcny: float = state["usdcny"]
-    target_weights: Dict[str, float] = state["target_weights"]
+    target_weights: dict[str, float] = state["target_weights"]
 
     tv = ticker_values_cny(holdings, prices, usdcny)
     bv = bucket_values(tv)
@@ -156,7 +155,7 @@ def dca_allocate(
     V_new = V + C
 
     # Step 1: Gap identification
-    gaps: Dict[str, float] = {}
+    gaps: dict[str, float] = {}
     for b in BUCKETS:
         target_val = V_new * target_weights[b]
         gap = target_val - bv[b]
@@ -195,12 +194,12 @@ def dca_allocate(
 
 def _equal_split_first_buy(
     C: float,
-    prices: Dict[str, float],
+    prices: dict[str, float],
     usdcny: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """First investment: equal 25% split across 4 buckets."""
     per_bucket = C / 4.0
-    result: Dict[str, float] = {}
+    result: dict[str, float] = {}
     for bucket, tickers in BUCKET_TICKERS.items():
         # Pick primary ticker for single-ticker buckets
         ticker = tickers[0]
@@ -215,12 +214,12 @@ def _equal_split_first_buy(
 
 
 def _min_trade_filter(
-    alloc: Dict[str, float],
-    gaps: Dict[str, float],
-    prices: Dict[str, float],
+    alloc: dict[str, float],
+    gaps: dict[str, float],
+    prices: dict[str, float],
     usdcny: float,
     min_trade: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Iteratively remove bucket allocations below min_trade."""
     if not alloc:
         return alloc
@@ -259,14 +258,14 @@ def _min_trade_filter(
 
 
 def _discretize_hamilton(
-    alloc: Dict[str, float],
-    prices: Dict[str, float],
+    alloc: dict[str, float],
+    prices: dict[str, float],
     usdcny: float,
-    holdings: Dict[str, float] = None,
-) -> Dict[str, float]:
+    holdings: dict[str, float] = None,
+) -> dict[str, float]:
     """Discretize allocation to lot-size units using Hamilton (max remainder) method."""
     # Map bucket allocations to ticker shares
-    ticker_alloc: Dict[str, float] = {}
+    ticker_alloc: dict[str, float] = {}
     for bucket, amount in alloc.items():
         tickers = BUCKET_TICKERS[bucket]
         if len(tickers) == 1:
@@ -314,8 +313,8 @@ def _discretize_hamilton(
         ticker_alloc[ticker] = amount / price_cny
 
     # Floor to lot sizes
-    result: Dict[str, float] = {}
-    remainders: List[Tuple[str, float]] = []
+    result: dict[str, float] = {}
+    remainders: list[tuple[str, float]] = []
     total_floor_value = 0.0
 
     for ticker, exact_shares in ticker_alloc.items():
@@ -353,7 +352,7 @@ def _discretize_hamilton(
 def dca_minimum_plan(
     state: dict,
     tolerance: float = 0.005,
-) -> Tuple[float, Dict[str, float]]:
+) -> tuple[float, dict[str, float]]:
     """Minimum investment to bring all buckets within tolerance.
 
     1. Gate: max_dev < tolerance → return (0, {})
@@ -364,10 +363,10 @@ def dca_minimum_plan(
 
     Returns: (C_min, plan) where plan = {ticker: shares}
     """
-    holdings: Dict[str, float] = state["holdings"]
-    prices: Dict[str, float] = state["prices"]
+    holdings: dict[str, float] = state["holdings"]
+    prices: dict[str, float] = state["prices"]
     usdcny: float = state["usdcny"]
-    target_weights: Dict[str, float] = state["target_weights"]
+    target_weights: dict[str, float] = state["target_weights"]
 
     tv = ticker_values_cny(holdings, prices, usdcny)
     bv = bucket_values(tv)

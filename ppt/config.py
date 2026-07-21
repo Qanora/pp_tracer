@@ -4,9 +4,9 @@ import json
 import os
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
-DEFAULT_CONFIG: Dict[str, Any] = {
+DEFAULT_CONFIG: dict[str, Any] = {
     "rebalance": {
         "tolerance": 0.005,
     },
@@ -30,7 +30,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
-def _deep_merge(base: Dict, override: Dict) -> Dict:
+def _deep_merge(base: dict, override: dict) -> dict:
     """Recursively merge override into base; missing keys filled from base."""
     result = deepcopy(base)
     for key, value in override.items():
@@ -46,7 +46,7 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
 class Config:
     """User configuration with defaults fallback (§6)."""
 
-    def __init__(self, data: Optional[Dict[str, Any]] = None):
+    def __init__(self, data: dict[str, Any] | None = None):
         self.data = data if data is not None else deepcopy(DEFAULT_CONFIG)
 
     @classmethod

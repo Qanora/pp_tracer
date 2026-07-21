@@ -6,7 +6,7 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +19,11 @@ class IStorageBackend(Protocol):
     and read_list() for JSON arrays.
     """
 
-    def read(self, path: str) -> Optional[Dict[str, Any]]:
+    def read(self, path: str) -> dict[str, Any] | None:
         """Read a JSON object from `path`.  Return None on failure."""
         ...
 
-    def read_list(self, path: str) -> List[Any]:
+    def read_list(self, path: str) -> list[Any]:
         """Read a JSON array from `path`.  Return [] on failure."""
         ...
 
@@ -38,10 +38,10 @@ class OssBackend:
     ossutil_path can be overridden via OSSUTIL_PATH env var.
     """
 
-    def __init__(self, ossutil_path: Optional[str] = None):
+    def __init__(self, ossutil_path: str | None = None):
         self.ossutil = ossutil_path or os.environ.get("OSSUTIL_PATH", "ossutil")
 
-    def read(self, oss_path: str) -> Optional[Dict[str, Any]]:
+    def read(self, oss_path: str) -> dict[str, Any] | None:
         try:
             result = subprocess.run(
                 [self.ossutil, "cat", oss_path],
@@ -61,7 +61,7 @@ class OssBackend:
             logger.warning("OSS read error (%s): %s", oss_path, e)
             return None
 
-    def read_list(self, oss_path: str) -> List[Any]:
+    def read_list(self, oss_path: str) -> list[Any]:
         try:
             result = subprocess.run(
                 [self.ossutil, "cat", oss_path],

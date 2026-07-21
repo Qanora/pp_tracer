@@ -4,7 +4,6 @@ Extracted from cli.py to reduce God Module size and enable unit testing.
 """
 
 import math
-from typing import List, Tuple
 
 from ppt.constants import BUCKETS
 from ppt.display import cmd_hint, status_badge, ticker_display
@@ -19,7 +18,7 @@ from ppt.valuation import ticker_values_cny
 
 def build_conversion_trades(
     holdings: dict, prices: dict, usdcny: float, cfg: dict
-) -> Tuple[dict, dict, list]:
+) -> tuple[dict, dict, list]:
     """Build conversion sell/buy plans for GLDM→518880 and SGOV→511360 (§4.10).
 
     Returns: (conversion_sells, conversion_buys, conversion_info)
@@ -94,7 +93,7 @@ def health_check(
     usdcny: float,
     price_history: list = None,
     prices_by_bucket: dict = None,
-) -> List[str]:
+) -> list[str]:
     """Generate health check alerts (§4.12, §4.9, §4.10). Sorted by severity."""
     alerts: list = []  # (severity: 0=crit, 1=warn, 2=info, msg)
 

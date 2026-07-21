@@ -138,8 +138,9 @@ class TestCLIRebalance:
         }
         runner = CliRunner()
 
-        with patch("ppt.cli.HoldingsStore", return_value=store), patch(
-            "ppt.cli.fetch_prices", return_value={"prices": prices, "usdcny": 1.0}
+        with (
+            patch("ppt.cli.HoldingsStore", return_value=store),
+            patch("ppt.cli.fetch_prices", return_value={"prices": prices, "usdcny": 1.0}),
         ):
             result = runner.invoke(main, ["--yes", "rebalance", "--full"])
 
