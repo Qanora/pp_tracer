@@ -1,5 +1,7 @@
 """Tests for conversion, intra-bucket rebalance, correlation, returns (§4.8–§4.13)."""
 
+import warnings
+
 import pytest
 
 from ppt.returns import (
@@ -158,7 +160,9 @@ class TestBucketCorrelation:
         prices_b = [100.0 + i * 5.0 for i in range(62)]
         prices_b[31] = float("inf")
 
-        rho = bucket_correlation(prices_a, prices_b)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            rho = bucket_correlation(prices_a, prices_b)
         assert rho is None, f"Inf returns should yield None, got {rho!r}"
 
 

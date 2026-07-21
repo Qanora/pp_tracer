@@ -33,7 +33,7 @@
 
 ### 2.1 持仓数据
 
-存储在 OSS（`oss://<your-bucket>/pp_holdings.json`），通过 `ossutil` CLI 读写。每次写入前自动备份到 `pp_holdings.backup.json`。
+存储在 OSS（`oss://<your-bucket>/pp_holdings.json`），通过 `ossutil` CLI 读写。持仓变更通过同路径 `.lock` 对象串行化；每次覆盖前自动备份到 `pp_holdings.backup.json`，锁冲突或备份失败时不写入主持仓。进程异常退出留下锁时，确认没有其他写入进程后再显式删除该 `.lock` 对象。
 
 ```json
 {
@@ -344,7 +344,7 @@ C = \frac{\sum_{i \in \text{under}} w_i^* \cdot V - \sum_{i \in \text{under}} V_
 计算定投达标最小投入方案。已达标提示无需投入；走廊内未达标给最小方案；过冲拦截提示指定金额。
 
 ### `ppt rebalance [--full] [--dry-run]`
-诊断桶偏离；`--full` 按卖超买欠生成并记录内部调仓，`--dry-run` 仅展示方案。内部调仓不改变累计投入或取出。
+诊断桶偏离；`--full` 按卖超买欠生成并以单次原子批次记录内部调仓，`--dry-run` 仅展示方案。卖出股数不超过对应标的实际持仓；内部调仓不改变累计投入或取出。
 
 ### `ppt buy 代码#股数@单价 [...]`
 记录买入。**同标的自动加权合并均价**（如 `AVUV#2@121.63 AVUV#1@121.69` → `AVUV#3@121.65`）。单价填原始币种（USD标的填美元价）。落账后展示更新后持仓 + 最大偏差。

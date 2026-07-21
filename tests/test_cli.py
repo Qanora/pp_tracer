@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from click.testing import CliRunner
 
-from ppt.cli import main
+from ppt.cli import _sell_ticker_for_bucket, main
 
 
 def cli(*args):
@@ -116,6 +116,13 @@ class _MemoryStore:
         return []
 
     def add_transaction(self, txn):
+        self.add_transactions([txn])
+
+    def add_transactions(self, transactions):
+        for txn in transactions:
+            self._apply_transaction(txn)
+
+    def _apply_transaction(self, txn):
         record = txn.to_dict()
         for trade in record["trades"]:
             ticker = trade["ticker"]
@@ -125,6 +132,27 @@ class _MemoryStore:
 
 
 class TestCLIRebalance:
+    def test_sell_ticker_uses_market_value_with_usd_tie_break(self):
+        prices = {"GLDM": 100.0, "518880.SS": 5.0}
+        assert (
+            _sell_ticker_for_bucket(
+                "gold",
+                {"GLDM": 1.0, "518880.SS": 200.0},
+                prices,
+                7.0,
+            )
+            == "518880.SS"
+        )
+        assert (
+            _sell_ticker_for_bucket(
+                "gold",
+                {"GLDM": 1.0, "518880.SS": 140.0},
+                prices,
+                7.0,
+            )
+            == "GLDM"
+        )
+
     def test_full_rebalance_records_internal_transactions_without_cash_flow(self):
         store = _MemoryStore()
         prices = {
@@ -162,3 +190,26 @@ class TestCLIRebalance:
             for trade in txn["trades"]
         )
         assert buys <= sells
+
+    def test_full_rebalance_sells_the_held_alternate_ticker(self):
+        store = _MemoryStore()
+        store.state["holdings"]["SPYM"] = 0.0
+        store.state["holdings"]["AVUV"] = 100.0
+        prices = {ticker: 100.0 for ticker in store.state["holdings"]}
+        runner = CliRunner()
+
+        with (
+            patch("ppt.cli.HoldingsStore", return_value=store),
+            patch("ppt.cli.fetch_prices", return_value={"prices": prices, "usdcny": 1.0}),
+        ):
+            result = runner.invoke(main, ["--yes", "rebalance", "--full"])
+
+        assert result.exit_code == 0, result.output
+        sold = [
+            trade
+            for txn in store.state["transactions"]
+            if txn["type"] == "sell"
+            for trade in txn["trades"]
+        ]
+        assert sold and sold[0]["ticker"] == "AVUV"
+        assert all(shares >= 0 for shares in store.state["holdings"].values())

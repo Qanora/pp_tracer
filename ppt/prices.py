@@ -5,6 +5,7 @@ IO layer — handles yfinance, local JSON cache, price validation.
 
 import json
 import logging
+import math
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -35,19 +36,30 @@ class PriceValidator:
         errors: list[str] = []
 
         # Check usdcny range (warning, not blocking)
-        if not (cls.USDCNY_MIN <= usdcny <= cls.USDCNY_MAX):
+        if isinstance(usdcny, bool) or not isinstance(usdcny, (int, float)):
+            errors.append(f"[PRICE] usdcny={usdcny} is not numeric")
+        elif not math.isfinite(usdcny):
+            errors.append(f"[PRICE] usdcny={usdcny} is not finite")
+        elif not (cls.USDCNY_MIN <= usdcny <= cls.USDCNY_MAX):
             errors.append(f"[PRICE] usdcny={usdcny} outside [{cls.USDCNY_MIN}, {cls.USDCNY_MAX}]")
 
         # Check all prices > 0 (blocking error)
         for ticker, price in prices.items():
             if ticker == "CNY=X":
                 continue
-            if price <= 0:
+            if isinstance(price, bool) or not isinstance(price, (int, float)):
+                errors.append(f"[PRICE] {ticker} price={price} is not numeric")
+            elif not math.isfinite(price):
+                errors.append(f"[PRICE] {ticker} price={price} is not finite")
+            elif price <= 0:
                 errors.append(f"[PRICE] {ticker} price={price} ≤ 0")
 
         # Check unique price count — anti-placeholder detection
         non_fx_prices = [p for t, p in prices.items() if t != "CNY=X"]
-        if non_fx_prices:
+        if non_fx_prices and all(
+            isinstance(price, (int, float)) and not isinstance(price, bool)
+            for price in non_fx_prices
+        ):
             unique_count = len(set(non_fx_prices))
             total_count = len(non_fx_prices)
             if unique_count <= total_count / 3:
@@ -94,7 +106,19 @@ class PriceCache:
         if not self.path.exists():
             return None
         try:
-            return json.loads(self.path.read_text(encoding="utf-8"))
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return None
+            prices = data.get("prices")
+            usdcny = data.get("usdcny")
+            if not isinstance(prices, dict) or not isinstance(usdcny, (int, float)):
+                return None
+            blocking = [
+                error
+                for error in PriceValidator.validate(prices, usdcny)
+                if "≤ 0" in error or "not finite" in error or "not numeric" in error
+            ]
+            return None if blocking else data
         except (json.JSONDecodeError, OSError):
             return None
 
@@ -134,14 +158,16 @@ class PriceFetcher:
         """
         # Try cache first
         if not force and self.cache.is_fresh():
-            logger.debug("Using cached prices")
-            return self.cache.load()
+            cached = self.cache.load()
+            if cached is not None:
+                logger.debug("Using cached prices")
+                return cached
 
         if offline:
-            if self.cache.is_fresh():
-                return self.cache.load()
             cached = self.cache.load()
             if cached:
+                if self.cache.is_fresh():
+                    return cached
                 logger.warning("Cache expired but --offline: using stale data")
                 return cached
             raise RuntimeError("--offline mode: no valid cache available")
@@ -161,7 +187,7 @@ class PriceFetcher:
         errors = PriceValidator.validate(prices, usdcny)
         blocking = []
         for e in errors:
-            if "≤ 0" in e:
+            if "≤ 0" in e or "not finite" in e or "not numeric" in e:
                 blocking.append(e)
             else:
                 logger.warning(e)

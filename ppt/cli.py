@@ -135,6 +135,29 @@ def _target_weights(cfg: dict, prices_by_bucket: dict) -> dict:
     )
 
 
+def _sell_ticker_for_bucket(
+    bucket: str,
+    holdings: dict[str, float],
+    prices: dict[str, float],
+    usdcny: float,
+) -> str | None:
+    """Choose the largest held ticker, preferring USD only when values tie."""
+    held = [
+        ticker
+        for ticker in BUCKET_TICKERS[bucket]
+        if holdings.get(ticker, 0) > 0 and prices.get(ticker, 0) > 0
+    ]
+    if not held:
+        return None
+    return max(
+        held,
+        key=lambda ticker: (
+            holdings[ticker] * prices[ticker] * (usdcny if ticker not in CNY_TICKERS else 1),
+            ticker not in CNY_TICKERS,
+        ),
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -541,9 +564,17 @@ def rebalance(ctx: click.Context, full: bool, dry_run: bool):
     for b in BUCKETS:
         dev = w[b] - target_weights[b]
         if dev > tolerance:
-            primary = PRIMARY_TICKER[b]
-            p_cny = prices.get(primary, 0) * (usdcny if primary not in CNY_TICKERS else 1)
-            over[b] = {"V_b": bv[b], "w_star": target_weights[b], "price": p_cny}
+            sell_ticker = _sell_ticker_for_bucket(b, holdings, prices, usdcny)
+            if sell_ticker is None:
+                continue
+            p_cny = prices[sell_ticker] * (usdcny if sell_ticker not in CNY_TICKERS else 1)
+            over[b] = {
+                "V_b": bv[b],
+                "w_star": target_weights[b],
+                "price": p_cny,
+                "ticker": sell_ticker,
+                "max_shares": holdings[sell_ticker],
+            }
             rule(f"{status_badge('warn')} {b}: {w[b]:.1%} > {target_weights[b]:.0%} 超配")
         elif dev < -tolerance:
             primary = PRIMARY_TICKER[b]
@@ -570,14 +601,14 @@ def rebalance(ctx: click.Context, full: bool, dry_run: bool):
                 list(over.values())[0]["w_star"],
                 V,
                 list(over.values())[0]["price"],
+                list(over.values())[0]["max_shares"],
             )
             if sell_plan > 0:
                 b = list(over.keys())[0]
-                sell_plan = {PRIMARY_TICKER[b]: sell_plan}
+                sell_plan = {over[b]["ticker"]: sell_plan}
         else:
             sell_plan = multi_over_rebalance(over, V)
-            # Map bucket → primary ticker
-            sell_plan = {PRIMARY_TICKER[b]: s for b, s in sell_plan.items() if b in over}
+            sell_plan = {over[b]["ticker"]: s for b, s in sell_plan.items() if b in over}
 
     if under:
         buy_plan = multi_under_rebalance(under, V)
@@ -632,6 +663,7 @@ def rebalance(ctx: click.Context, full: bool, dry_run: bool):
             note("已取消")
             return
 
+    transactions = []
     for txn_type, trade_plan in (("sell", sell_plan), ("buy", buy_plan)):
         for ticker, shares in trade_plan.items():
             if shares <= 0:
@@ -652,7 +684,15 @@ def rebalance(ctx: click.Context, full: bool, dry_run: bool):
                 usdcny=usdcny,
                 internal=True,
             )
-            store.add_transaction(txn)
+            transactions.append(txn)
+
+    store.add_transactions(transactions)
+    for txn in transactions:
+        for trade in txn.trades:
+            ticker = trade["ticker"]
+            shares = trade["shares"]
+            price = trade["price"]
+            txn_type = txn.txn_type
             action = "买入" if txn_type == "buy" else "卖出"
             note(f"{action} {ticker} {shares:.0f}股 @ {price:.2f}")
 
@@ -1079,7 +1119,7 @@ def init(ctx: click.Context):
         "transactions": [],
         "created_at": created_at,
     }
-    store.save(data)
+    store.save(data, backup=old_state is not None)
     success_banner("已初始化")
 
 

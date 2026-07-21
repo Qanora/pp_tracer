@@ -60,6 +60,11 @@ class TestPriceValidator:
         errors = PriceValidator.validate(prices=bad_prices, usdcny=7.25)
         assert any("unique" in e.lower() or "placeholder" in e.lower() for e in errors)
 
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    def test_non_finite_price_is_blocking(self, value):
+        errors = PriceValidator.validate(prices={"SPYM": value}, usdcny=7.25)
+        assert any("not finite" in error for error in errors)
+
 
 # ── Price Cache ───────────────────────────────────────────────────────────────
 
@@ -117,6 +122,19 @@ class TestPriceCache:
         path = self.temp_cache_path()
         cache = PriceCache(path=path, ttl=300)
         assert cache.is_fresh() is False
+
+    def test_non_finite_cache_is_rejected(self):
+        path = self.temp_cache_path()
+        path.write_text(
+            json.dumps(
+                {
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "prices": {"SPYM": float("inf")},
+                    "usdcny": 7.25,
+                }
+            )
+        )
+        assert PriceCache(path=path).load() is None
 
 
 # ── Price Fetcher (with mock yfinance) ────────────────────────────────────────

@@ -1,7 +1,11 @@
 """Tests for holdings I/O (§2) — OSS-only storage."""
 
 import uuid
+from contextlib import nullcontext
 from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
 
 from ppt.holdings import (
     HoldingsStore,
@@ -9,6 +13,7 @@ from ppt.holdings import (
     validate_holdings,
     validate_transaction_input,
 )
+from ppt.storage import OssBackend
 
 
 class _FakeBackend:
@@ -76,6 +81,11 @@ class TestValidateTransactionInput:
         result = validate_transaction_input("SPYM", 10, 0)
         assert len(result) > 0
 
+    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
+    def test_non_finite_values_are_rejected_without_crashing(self, value):
+        assert validate_transaction_input("SPYM", value, 72.50)
+        assert validate_transaction_input("SPYM", 10, value)
+
 
 class TestValidateHoldings:
     """Full holdings state validation."""
@@ -107,6 +117,35 @@ class TestValidateHoldings:
             }
         )
         assert result is False
+
+    @pytest.mark.parametrize("cash_in", ["100", float("nan"), float("inf")])
+    def test_invalid_cash_type_or_value(self, cash_in):
+        assert (
+            validate_holdings(
+                {
+                    "holdings": {},
+                    "cash_in": cash_in,
+                    "cash_out": 0.0,
+                    "transactions": [],
+                    "created_at": "2025-01-01",
+                }
+            )
+            is False
+        )
+
+    def test_invalid_holding_value(self):
+        assert (
+            validate_holdings(
+                {
+                    "holdings": {"SPYM": float("inf")},
+                    "cash_in": 0.0,
+                    "cash_out": 0.0,
+                    "transactions": [],
+                    "created_at": "2025-01-01",
+                }
+            )
+            is False
+        )
 
 
 # ── HoldingsStore (OSS-mocked) ────────────────────────────────────────────────
@@ -228,6 +267,89 @@ class TestHoldingsStore:
         store.undo_last()
         after_undo = store.load()
         assert after_undo["holdings"]["SPYM"] == 10.0  # restored
+        assert after_undo["cash_in"] == 50000.0
+        assert after_undo["cash_out"] == 0.0
+
+    @pytest.mark.parametrize("txn_type,cash_key", [("buy", "cash_in"), ("sell", "cash_out")])
+    def test_undo_restores_external_cash_totals(self, txn_type, cash_key):
+        store = self.make_store_with_memory()
+        store.save(
+            {
+                "holdings": {"SPYM": 10.0},
+                "cash_in": 0.0,
+                "cash_out": 0.0,
+                "transactions": [],
+                "created_at": "2025-01-01",
+            }
+        )
+        txn = Transaction(
+            txn_id=str(uuid.uuid4()),
+            date="2025-06-19",
+            txn_type=txn_type,
+            trades=[{"ticker": "SPYM", "shares": 2, "price": 100.0, "currency": "USD"}],
+            usdcny=7.0,
+        )
+
+        store.add_transaction(txn)
+        assert store.load()[cash_key] == 1400.0
+        store.undo_last()
+
+        state = store.load()
+        assert state["cash_in"] == 0.0
+        assert state["cash_out"] == 0.0
+
+    def test_batch_rejects_oversell_without_partial_update(self):
+        store = self.make_store_with_memory()
+        initial = {
+            "holdings": {"SPYM": 10.0, "VGIT": 0.0},
+            "cash_in": 0.0,
+            "cash_out": 0.0,
+            "transactions": [],
+            "created_at": "2025-01-01",
+        }
+        store.save(initial)
+        transactions = [
+            Transaction(
+                str(uuid.uuid4()),
+                "2025-06-19",
+                "buy",
+                [{"ticker": "VGIT", "shares": 1, "price": 50.0, "currency": "USD"}],
+                7.0,
+                internal=True,
+            ),
+            Transaction(
+                str(uuid.uuid4()),
+                "2025-06-19",
+                "sell",
+                [{"ticker": "SPYM", "shares": 11, "price": 100.0, "currency": "USD"}],
+                7.0,
+                internal=True,
+            ),
+        ]
+
+        with pytest.raises(ValueError, match="Insufficient holdings"):
+            store.add_transactions(transactions)
+
+        assert store.load() == initial
+
+    def test_backup_failure_prevents_primary_write(self, tmp_path, monkeypatch):
+        backend = OssBackend("ossutil")
+        monkeypatch.setattr(backend, "lock", lambda _: nullcontext())
+        monkeypatch.setattr(backend, "copy", lambda _source, _destination: False)
+        backend.write = MagicMock(return_value=True)
+        store = HoldingsStore(local_dir=tmp_path, backend=backend)
+        state = {
+            "holdings": {},
+            "cash_in": 0.0,
+            "cash_out": 0.0,
+            "transactions": [],
+            "created_at": "2025-01-01",
+        }
+
+        with pytest.raises(RuntimeError, match="back up"):
+            store.save(state)
+
+        backend.write.assert_not_called()
 
     def test_undo_empty_history(self):
         """Undo with no transactions → no error."""

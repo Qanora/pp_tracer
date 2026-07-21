@@ -72,7 +72,13 @@ def multi_over_rebalance(
     if abs(1.0 - sum_w) < EPSILON:
         result: dict[str, float] = {}
         for b, data in over.items():
-            s = single_over_rebalance(data["V_b"], data["w_star"], V, data["price"])
+            s = single_over_rebalance(
+                data["V_b"],
+                data["w_star"],
+                V,
+                data["price"],
+                data.get("max_shares"),
+            )
             if s > 0:
                 result[b] = s
         return result
@@ -86,6 +92,8 @@ def multi_over_rebalance(
         sell_amount = data["V_b"] - data["w_star"] * (V - S)
         if sell_amount > EPSILON:
             s = math.ceil(sell_amount / data["price"] - EPSILON)
+            if data.get("max_shares") is not None:
+                s = min(s, data["max_shares"])
             if s > 0:
                 result[b] = float(s)
     return result

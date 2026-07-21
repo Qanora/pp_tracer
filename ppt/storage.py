@@ -5,6 +5,8 @@ import logging
 import os
 import subprocess
 import tempfile
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -40,6 +42,15 @@ class OssBackend:
 
     def __init__(self, ossutil_path: str | None = None):
         self.ossutil = ossutil_path or os.environ.get("OSSUTIL_PATH", "ossutil")
+
+    @staticmethod
+    def _split_path(oss_path: str) -> tuple[str, str]:
+        if not oss_path.startswith("oss://"):
+            raise ValueError(f"Invalid OSS path: {oss_path}")
+        bucket, separator, key = oss_path[6:].partition("/")
+        if not bucket or not separator or not key:
+            raise ValueError(f"OSS object path required: {oss_path}")
+        return bucket, key
 
     def read(self, oss_path: str) -> dict[str, Any] | None:
         try:
@@ -107,3 +118,73 @@ class OssBackend:
         finally:
             if tmp_path_str and os.path.exists(tmp_path_str):
                 os.unlink(tmp_path_str)
+
+    def copy(self, source: str, destination: str) -> bool:
+        """Copy one OSS object, returning whether the backup completed."""
+        try:
+            result = subprocess.run(
+                [self.ossutil, "cp", source, destination, "-f"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.error("OSS copy error (%s -> %s): %s", source, destination, e)
+            return False
+        if result.returncode != 0:
+            logger.error(
+                "ossutil cp %s -> %s failed: %s",
+                source,
+                destination,
+                result.stderr.strip(),
+            )
+            return False
+        return True
+
+    @contextmanager
+    def lock(self, oss_path: str):
+        """Hold a cross-process OSS lock while mutating one object."""
+        lock_path = f"{oss_path}.lock"
+        bucket, key = self._split_path(lock_path)
+        owner = str(uuid.uuid4())
+        payload = json.dumps({"owner": owner})
+        try:
+            result = subprocess.run(
+                [
+                    self.ossutil,
+                    "api",
+                    "put-object",
+                    "--bucket",
+                    bucket,
+                    "--key",
+                    key,
+                    "--body",
+                    payload,
+                    "--forbid-overwrite",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            raise RuntimeError(f"Failed to acquire OSS lock ({lock_path}): {e}") from e
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Holdings are being updated by another process ({lock_path}); "
+                "if no process is active, remove the stale lock explicitly"
+            )
+
+        try:
+            yield
+        finally:
+            try:
+                result = subprocess.run(
+                    [self.ossutil, "rm", lock_path, "-f"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                if result.returncode != 0:
+                    logger.error("Failed to release OSS lock %s: %s", lock_path, result.stderr)
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                logger.error("Failed to release OSS lock %s: %s", lock_path, e)

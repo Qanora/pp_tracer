@@ -175,6 +175,13 @@ def bucket_correlation(
     n = min(len(prices_a), len(prices_b)) - 1
     arr_a = np.asarray(prices_a[-n - 1 :], dtype=np.float64)
     arr_b = np.asarray(prices_b[-n - 1 :], dtype=np.float64)
+    if (
+        not np.all(np.isfinite(arr_a))
+        or not np.all(np.isfinite(arr_b))
+        or np.any(np.abs(arr_a[:-1]) < EPSILON)
+        or np.any(np.abs(arr_b[:-1]) < EPSILON)
+    ):
+        return None
     ret_a = np.diff(arr_a) / arr_a[:-1]
     ret_b = np.diff(arr_b) / arr_b[:-1]
 

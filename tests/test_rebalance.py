@@ -67,6 +67,27 @@ class TestSingleOverRebalance:
 class TestMultiOverRebalance:
     """§4.6 多桶同时超标 — 联立方程."""
 
+    def test_clamps_each_sale_to_available_holdings(self):
+        result = multi_over_rebalance(
+            {
+                "stock": {
+                    "V_b": 8000.0,
+                    "w_star": 0.25,
+                    "price": 100.0,
+                    "max_shares": 5,
+                },
+                "bond": {
+                    "V_b": 6000.0,
+                    "w_star": 0.25,
+                    "price": 100.0,
+                    "max_shares": 7,
+                },
+            },
+            V=20000.0,
+        )
+        assert result["stock"] <= 5
+        assert result["bond"] <= 7
+
     def test_two_over(self):
         """Two overweight buckets solved simultaneously."""
         # V = 10000, stock=4000(over), bond=4000(over), gold=1000, cash=1000
