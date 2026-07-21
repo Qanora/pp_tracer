@@ -5,7 +5,7 @@ import math
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from ppt.constants import (
     BUCKETS,
@@ -32,7 +32,7 @@ def validate_transaction_input(
     ticker: str,
     shares: float,
     price: float,
-) -> List[str]:
+) -> list[str]:
     """Validate user input for buy/sell command (§5). Returns list of errors."""
     errors = []
 
@@ -81,7 +81,7 @@ class Transaction:
     txn_id: str
     date: str
     txn_type: str  # "buy" | "sell"
-    trades: List[Dict[str, Any]]
+    trades: list[dict[str, Any]]
     usdcny: float
     internal: bool = False
 
@@ -111,8 +111,8 @@ class HoldingsStore:
 
     def __init__(
         self,
-        local_dir: Optional[Path] = None,
-        backend: Optional[IStorageBackend] = None,
+        local_dir: Path | None = None,
+        backend: IStorageBackend | None = None,
     ):
         # local_dir kept for config/logs only (no data files)
         self.local_dir = local_dir or Path.home() / ".pp"
@@ -132,7 +132,7 @@ class HoldingsStore:
 
     # ── Holdings (public API) ─────────────────────────────────────────────
 
-    def load(self) -> Optional[dict]:
+    def load(self) -> dict | None:
         """Load holdings from OSS."""
         data = self.backend.read(OSS_HOLDINGS_PATH)
         if data and validate_holdings(data):
@@ -172,7 +172,7 @@ class HoldingsStore:
         state["transactions"].append(txn.to_dict())
         self.save(state)
 
-    def undo_last(self) -> Optional[dict]:
+    def undo_last(self) -> dict | None:
         """Undo the most recent transaction. Returns the removed transaction or None."""
         state = self.load()
         if state is None or not state["transactions"]:
@@ -208,11 +208,11 @@ class HoldingsStore:
 
     # ── Price history ────────────────────────────────────────────────────
 
-    def load_price_history(self) -> List[dict]:
+    def load_price_history(self) -> list[dict]:
         """Load bucket price history from OSS."""
         return self.backend.read_list(OSS_PRICE_HISTORY_PATH)
 
-    def _save_price_history(self, history: List[dict]) -> None:
+    def _save_price_history(self, history: list[dict]) -> None:
         """Save price history to OSS."""
         self.backend.write(OSS_PRICE_HISTORY_PATH, history)
 
@@ -265,7 +265,7 @@ class HoldingsStore:
 
         self._save_price_history(history)
 
-    def _backfill_history(self, history: List[dict]) -> List[dict]:
+    def _backfill_history(self, history: list[dict]) -> list[dict]:
         """Backfill ~3 months (~60 trading days) of bucket prices via yfinance."""
         try:
             import yfinance as yf

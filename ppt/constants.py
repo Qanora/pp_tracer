@@ -1,21 +1,20 @@
 """Asset configuration and fixed constants (§1, §6, §9)."""
 
 import os
-from typing import Dict, FrozenSet, Tuple
 
 # ── §1 资产配置 ──────────────────────────────────────────────────────────────
 
-BUCKETS: FrozenSet[str] = frozenset({"stock", "bond", "gold", "cash"})
-BUCKET_ORDER: Tuple[str, ...] = ("stock", "bond", "gold", "cash")  # display order
+BUCKETS: frozenset[str] = frozenset({"stock", "bond", "gold", "cash"})
+BUCKET_ORDER: tuple[str, ...] = ("stock", "bond", "gold", "cash")  # display order
 
-BUCKET_TICKERS: Dict[str, Tuple[str, ...]] = {
+BUCKET_TICKERS: dict[str, tuple[str, ...]] = {
     "stock": ("SPYM", "AVUV"),
     "bond": ("VGIT",),
     "gold": ("GLDM", "518880.SS"),
     "cash": ("SGOV", "511360.SS"),
 }
 
-PRIMARY_TICKER: Dict[str, str] = {
+PRIMARY_TICKER: dict[str, str] = {
     "stock": "SPYM",
     "bond": "VGIT",
     "gold": "GLDM",
@@ -34,17 +33,17 @@ _TICKER_META: dict = {
     "511360.SS": {"market": "A", "lot": 100, "currency": "CNY"},
 }
 
-TICKER_WHITELIST: FrozenSet[str] = frozenset(_TICKER_META.keys())
+TICKER_WHITELIST: frozenset[str] = frozenset(_TICKER_META.keys())
 
-TICKER_MARKET: Dict[str, str] = {t: m["market"] for t, m in _TICKER_META.items()}
+TICKER_MARKET: dict[str, str] = {t: m["market"] for t, m in _TICKER_META.items()}
 
-TICKER_LOT_SIZE: Dict[str, int] = {t: m["lot"] for t, m in _TICKER_META.items()}
+TICKER_LOT_SIZE: dict[str, int] = {t: m["lot"] for t, m in _TICKER_META.items()}
 
-TICKER_CURRENCY: Dict[str, str] = {t: m["currency"] for t, m in _TICKER_META.items()}
+TICKER_CURRENCY: dict[str, str] = {t: m["currency"] for t, m in _TICKER_META.items()}
 
-USD_TICKERS: FrozenSet[str] = frozenset(t for t, m in _TICKER_META.items() if m["market"] == "US")
-CNY_TICKERS: FrozenSet[str] = frozenset(t for t, m in _TICKER_META.items() if m["market"] == "A")
-A_SHARE_TICKERS: FrozenSet[str] = frozenset(
+USD_TICKERS: frozenset[str] = frozenset(t for t, m in _TICKER_META.items() if m["market"] == "US")
+CNY_TICKERS: frozenset[str] = frozenset(t for t, m in _TICKER_META.items() if m["market"] == "A")
+A_SHARE_TICKERS: frozenset[str] = frozenset(
     t for t, m in _TICKER_META.items() if m["market"] == "A"
 )
 
@@ -53,7 +52,7 @@ A_SHARE_TICKERS: FrozenSet[str] = frozenset(
 # 波动率
 VOL_WINDOW: int = 60  # 滚动窗口 (天)
 PRICE_HISTORY_MAX: int = 120  # 历史保留 (天)
-VOL_FALLBACK: Dict[str, float] = {  # 经验默认波动率
+VOL_FALLBACK: dict[str, float] = {  # 经验默认波动率
     "stock": 0.15,
     "bond": 0.10,
     "gold": 0.16,
@@ -97,4 +96,4 @@ OSS_PRICE_HISTORY_PATH: str = f"oss://{_oss_bucket}/pp_price_history.json"
 LOCAL_DIR: str = "~/.pp/"
 
 # yfinance
-YFINANCE_TICKERS: Tuple[str, ...] = tuple(list(_TICKER_META.keys()) + ["CNY=X"])
+YFINANCE_TICKERS: tuple[str, ...] = tuple(list(_TICKER_META.keys()) + ["CNY=X"])

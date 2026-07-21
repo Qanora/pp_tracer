@@ -4,8 +4,6 @@ Atomic component layer — generic, no business semantics.
 All terminal output MUST go through these components.
 """
 
-from typing import List, Optional, Tuple, Union
-
 from rich import box
 from rich.console import Console
 from rich.panel import Panel as RichPanel
@@ -81,7 +79,7 @@ def rule(title: str, style: str = Color.accent) -> None:
 
 def panel(
     title: str,
-    content: Union[str, List[str]],
+    content: str | list[str],
     accent: str = Color.accent,
     border: str = Color.border_ok,
 ) -> None:
@@ -106,7 +104,7 @@ def panel(
 def kpi(
     label: str,
     value: str,
-    sub: Optional[str] = None,
+    sub: str | None = None,
     value_style: str = Color.fg_strong,
 ) -> None:
     """Single KPI: small dim label above big bold value, optional sub-text."""
@@ -117,7 +115,7 @@ def kpi(
     console.print("\n".join(lines))
 
 
-def kpi_row(kpis: List[Tuple[str, str, str]]) -> None:
+def kpi_row(kpis: list[tuple[str, str, str]]) -> None:
     """Horizontal KPI row. Each tuple: (label, value, value_style)."""
     cells = []
     for label, value, style in kpis:
@@ -138,7 +136,7 @@ def kv(label: str, value: str) -> str:
     return f"[{Color.fg_muted}]{label}[/]: [{Color.fg_default}]{value}[/]"
 
 
-def kv_table(pairs: List[Tuple[str, str]]) -> None:
+def kv_table(pairs: list[tuple[str, str]]) -> None:
     """Multi-row KV table."""
     t = Table(show_header=False, box=None, padding=(0, GUTTER))
     t.add_column(style=Color.fg_muted, justify="right")
@@ -249,7 +247,7 @@ def dev_change(old_dev: float, new_dev: float) -> str:
 # ── Mini trend ───────────────────────────────────────────────────────────────
 
 
-def mini_trend(values: List[float], width: int = 8) -> str:
+def mini_trend(values: list[float], width: int = 8) -> str:
     """Mini sparkline: ▁▂▃▄▅▆▇█."""
     blocks = "▁▂▃▄▅▆▇█"
     if not values or max(values) - min(values) < 1e-9:
@@ -333,7 +331,7 @@ def pad_center(s: str, width: int) -> str:
     return " " * left + s + " " * right
 
 
-def cols(*specs: Tuple[str, int, str]) -> str:
+def cols(*specs: tuple[str, int, str]) -> str:
     """Format aligned columns with CJK-aware visual widths.
 
     Each spec: (value, visual_width, align) where align is 'left'/'right'/'center'.
@@ -365,7 +363,7 @@ def success_banner(text: str) -> None:
     console.print(f"[{Color.profit}]✅ {text}[/]")
 
 
-def warn_card(title: str, body: Optional[str] = None, icon: str = "⚠") -> None:
+def warn_card(title: str, body: str | None = None, icon: str = "⚠") -> None:
     """Warning/error card."""
     content = f"[{Color.warn}]{icon} {title}[/]"
     if body:

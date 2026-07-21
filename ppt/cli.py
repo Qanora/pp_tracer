@@ -7,7 +7,6 @@ import math
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
 
 import click
 
@@ -81,7 +80,7 @@ from ppt.valuation import (
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _load_state(store: HoldingsStore) -> Optional[dict]:
+def _load_state(store: HoldingsStore) -> dict | None:
     """Load holdings from OSS, or show empty state and return None."""
     state = store.load()
     if state is None:
@@ -89,7 +88,7 @@ def _load_state(store: HoldingsStore) -> Optional[dict]:
     return state
 
 
-def _get_prices(fresh: bool = False, offline: bool = False) -> Optional[dict]:
+def _get_prices(fresh: bool = False, offline: bool = False) -> dict | None:
     """Fetch prices via canonical fetch_prices(), with UI error handling."""
     try:
         return fetch_prices(force=fresh, offline=offline)
@@ -98,7 +97,7 @@ def _get_prices(fresh: bool = False, offline: bool = False) -> Optional[dict]:
         return None
 
 
-def _parse_trade_arg(arg: str) -> Tuple[str, int, float]:
+def _parse_trade_arg(arg: str) -> tuple[str, int, float]:
     """Parse 'TICKER#shares@price' format."""
     try:
         ticker, rest = arg.split("#")
@@ -110,7 +109,7 @@ def _parse_trade_arg(arg: str) -> Tuple[str, int, float]:
         raise click.BadParameter(f"格式错误: {arg}，应为 TICKER#shares@price")
 
 
-def _bucket_price_series(store: HoldingsStore, history: Optional[list] = None) -> dict:
+def _bucket_price_series(store: HoldingsStore, history: list | None = None) -> dict:
     """Load usable historical prices keyed by portfolio bucket."""
     result = {bucket: [] for bucket in BUCKETS}
     for entry in history if history is not None else store.load_price_history():
@@ -165,7 +164,7 @@ def main(ctx: click.Context, fresh: bool, offline: bool, yes: bool):
 @main.command()
 @click.argument("amount", required=False, type=float)
 @click.pass_context
-def plan(ctx: click.Context, amount: Optional[float]):
+def plan(ctx: click.Context, amount: float | None):
     """生成买入建议。无参数则计算达标最小投入额。"""
     store: HoldingsStore = ctx.obj["store"]
     state = _load_state(store)
@@ -384,7 +383,7 @@ def plan(ctx: click.Context, amount: Optional[float]):
 def _record_trade(
     ctx: click.Context,
     txn_type: str,
-    trade_args: List[str],
+    trade_args: list[str],
 ):
     """Shared buy/sell logic."""
     # Parse and validate trades FIRST (before state check)
@@ -663,7 +662,7 @@ def rebalance(ctx: click.Context, full: bool, dry_run: bool):
 @main.command(context_settings=dict(ignore_unknown_options=True))
 @click.argument("trades", nargs=-1, required=True)
 @click.pass_context
-def buy(ctx: click.Context, trades: Tuple[str, ...]):
+def buy(ctx: click.Context, trades: tuple[str, ...]):
     """记录买入。格式: TICKER#shares@price"""
     _record_trade(ctx, "buy", list(trades))
 
@@ -671,7 +670,7 @@ def buy(ctx: click.Context, trades: Tuple[str, ...]):
 @main.command(context_settings=dict(ignore_unknown_options=True))
 @click.argument("trades", nargs=-1, required=True)
 @click.pass_context
-def sell(ctx: click.Context, trades: Tuple[str, ...]):
+def sell(ctx: click.Context, trades: tuple[str, ...]):
     """记录卖出。格式: TICKER#shares@price"""
     _record_trade(ctx, "sell", list(trades))
 

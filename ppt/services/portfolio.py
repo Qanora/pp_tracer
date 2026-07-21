@@ -3,8 +3,6 @@
 Extracted from cli.py to reduce God Module size and enable unit testing.
 """
 
-from typing import Tuple
-
 from ppt.constants import BUCKETS, CNY_TICKERS
 from ppt.display import Color, cols, price_str, ticker_display, ticker_unit
 from ppt.valuation import bucket_values, bucket_weights, ticker_values_cny, total_value
@@ -29,7 +27,7 @@ def portfolio_snapshot(holdings: dict, prices: dict, usdcny: float, target_weigh
     return {"weights": w, "deviations": devs, "total_value": total, "bucket_values": bv}
 
 
-def build_allocation_table(ticker_shares: dict, prices: dict, usdcny: float) -> Tuple[list, float]:
+def build_allocation_table(ticker_shares: dict, prices: dict, usdcny: float) -> tuple[list, float]:
     """Build formatted allocation table lines. Returns (lines, total_cny)."""
     # Header and rows via CJK-aware cols()
     header = cols(

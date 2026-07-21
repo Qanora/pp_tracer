@@ -5,7 +5,6 @@ are injected via function arguments (not read from files/env).
 """
 
 import math
-from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -25,16 +24,16 @@ from ppt.constants import (
 
 
 def ticker_values_cny(
-    holdings: Dict[str, float],
-    prices: Dict[str, float],
+    holdings: dict[str, float],
+    prices: dict[str, float],
     usdcny: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """ticker → CNY market value.
 
     USD tickers: holdings * price * usdcny
     CNY tickers: holdings * price (direct)
     """
-    result: Dict[str, float] = {}
+    result: dict[str, float] = {}
     for t, shares in holdings.items():
         if shares == 0:
             result[t] = 0.0
@@ -47,15 +46,15 @@ def ticker_values_cny(
     return result
 
 
-def bucket_values(ticker_vals: Dict[str, float]) -> Dict[str, float]:
+def bucket_values(ticker_vals: dict[str, float]) -> dict[str, float]:
     """Sum ticker CNY values into bucket values."""
-    bv: Dict[str, float] = {b: 0.0 for b in BUCKETS}
+    bv: dict[str, float] = {b: 0.0 for b in BUCKETS}
     for bucket, tickers in BUCKET_TICKERS.items():
         bv[bucket] = sum(ticker_vals.get(t, 0.0) for t in tickers)
     return bv
 
 
-def bucket_weights(bucket_vals: Dict[str, float]) -> Dict[str, float]:
+def bucket_weights(bucket_vals: dict[str, float]) -> dict[str, float]:
     """Bucket weight = bucket_value / total."""
     total = sum(bucket_vals.values())
     if abs(total) < EPSILON:
@@ -63,16 +62,16 @@ def bucket_weights(bucket_vals: Dict[str, float]) -> Dict[str, float]:
     return {b: v / total for b, v in bucket_vals.items()}
 
 
-def total_value(bucket_vals: Dict[str, float]) -> float:
+def total_value(bucket_vals: dict[str, float]) -> float:
     """Sum of all bucket values."""
     return sum(bucket_vals.values())
 
 
 def currency_split(
-    holdings: Dict[str, float],
-    prices: Dict[str, float],
+    holdings: dict[str, float],
+    prices: dict[str, float],
     usdcny: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Compute USD/CNY value split from ticker-level holdings.
 
     Returns: {"usd": usd_total_cny, "cny": cny_total, "total": total}
@@ -97,17 +96,17 @@ def currency_split(
 # ── §4.2 目标权重 ────────────────────────────────────────────────────────────
 
 
-def equal_target_weights() -> Dict[str, float]:
+def equal_target_weights() -> dict[str, float]:
     """Equal-weight: each bucket = 0.25."""
     return {b: 0.25 for b in BUCKETS}
 
 
 def risk_parity_weights(
-    sigmas: Dict[str, float],
+    sigmas: dict[str, float],
     cap: float = 0.40,
     floor: float = 0.10,
     max_iter: int = 20,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """Risk parity with cap/floor via iterative clipping algorithm.
 
     1. w*_b ∝ 1/σ_b
@@ -124,8 +123,8 @@ def risk_parity_weights(
 
     # Step 2: iterative clipping
     for _ in range(max_iter):
-        pinned: Dict[str, float] = {}
-        free: List[str] = []
+        pinned: dict[str, float] = {}
+        free: list[str] = []
         excess = 0.0
 
         for b in buckets:
@@ -170,8 +169,8 @@ def risk_parity_weights(
 
 
 def volatility(
-    prices: List[float],
-    fallback: Optional[float] = None,
+    prices: list[float],
+    fallback: float | None = None,
 ) -> float:
     """60-day rolling annualized volatility from price sequence.
 
@@ -199,9 +198,9 @@ def volatility(
 
 def corridor_bounds(
     w_star: float,
-    sigma: Optional[float],
+    sigma: float | None,
     k: float = 2.5,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Adaptive rebalancing corridor.
 
     h = max(k * sigma / sqrt(12), h_min)
@@ -223,7 +222,7 @@ def corridor_bounds(
 
 
 def trend_signal(
-    prices: List[float],
+    prices: list[float],
     S: int = 10,
     L: int = 20,
 ) -> float:
@@ -246,11 +245,11 @@ def trend_signal(
 
 def trend_adjusted_corridor(
     w_star: float,
-    sigma: Optional[float],
+    sigma: float | None,
     trend: float,
     k: float = 2.5,
     lam: float = 0.5,
-) -> Tuple[float, float]:
+) -> tuple[float, float]:
     """Adjust corridor bounds based on trend signal.
 
     - Weak bucket (trend < 0): raise upper bound (delay selling)
