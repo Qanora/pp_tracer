@@ -1,4 +1,4 @@
-"""CLI contract tests for the four-command surface."""
+"""CLI contract tests for the five-command surface."""
 
 import uuid
 from copy import deepcopy
@@ -7,7 +7,7 @@ from click.testing import CliRunner
 
 from ppt.cli import main
 from ppt.holdings import Trade, TradeBatch
-from ppt.prices import MarketSnapshot
+from ppt.prices import MarketDataError, MarketSnapshot
 from ppt.rebalance import PlanResult
 from ppt.valuation import BalanceScore
 
@@ -56,17 +56,18 @@ def _market(history=None):
     return MarketSnapshot(PRICES, 1.0, history or {})
 
 
-def test_help_exposes_exactly_four_commands():
+def test_help_exposes_exactly_five_commands():
     result = CliRunner().invoke(main, ["--help"])
 
     assert result.exit_code == 0
     command_lines = {
         line.strip().split()[0]
         for line in result.output.splitlines()
-        if line.startswith("  ") and line.strip().split()[0] in {"init", "buy", "plan", "history"}
+        if line.startswith("  ")
+        and line.strip().split()[0] in {"init", "buy", "status", "plan", "history"}
     }
-    assert command_lines == {"init", "buy", "plan", "history"}
-    for removed in ("sell", "status", "undo", "rebalance", "config", "clean-history"):
+    assert command_lines == {"init", "buy", "status", "plan", "history"}
+    for removed in ("sell", "undo", "rebalance", "config", "clean-history"):
         assert removed not in result.output
 
 
@@ -109,6 +110,76 @@ def test_buy_rejects_duplicate_ticker_before_storage(monkeypatch):
 
     assert result.exit_code != 0
     assert not store.recorded
+
+
+def test_status_shows_complete_current_snapshot_without_writing(monkeypatch):
+    store = _Store(empty_ledger())
+    store.record_batch(
+        (
+            Trade("SPYM", 50, 100.0),
+            Trade("AVUV", 50, 100.0),
+            Trade("VGIT", 100, 100.0),
+            Trade("GLDM", 50, 100.0),
+            Trade("518880.SS", 5000, 1.0),
+            Trade("SGOV", 50, 100.0),
+            Trade("511360.SS", 5000, 1.0),
+        ),
+        1.0,
+    )
+    store.recorded.clear()
+    before = deepcopy(store.ledger)
+    monkeypatch.setattr("ppt.cli._store", lambda: store)
+    monkeypatch.setattr("ppt.cli.fetch_market", lambda: _market())
+
+    result = CliRunner().invoke(main, ["status"])
+
+    assert result.exit_code == 0, result.output
+    for ticker in PRICES:
+        assert ticker in result.output
+    assert "¥40,000.00" in result.output
+    assert "四桶配置" in result.output
+    assert "币种配置" in result.output
+    assert "75.00%" in result.output
+    assert "25.00%" in result.output
+    assert "100%/100%" in result.output
+    assert "…" not in result.output
+    assert "三级最大偏差" in result.output
+    assert "ppt buy" not in result.output
+    assert store.ledger == before
+    assert store.recorded == []
+
+
+def test_status_handles_empty_initialized_ledger_without_fake_weights(monkeypatch):
+    store = _Store(empty_ledger())
+    monkeypatch.setattr("ppt.cli._store", lambda: store)
+    monkeypatch.setattr("ppt.cli.fetch_market", lambda: _market())
+
+    result = CliRunner().invoke(main, ["status"], env={"COLUMNS": "240"})
+
+    assert result.exit_code == 0, result.output
+    for ticker in PRICES:
+        assert ticker in result.output
+    assert "¥0.00" in result.output
+    assert "暂无持仓" in result.output
+    assert "—" in result.output
+
+
+def test_status_propagates_invalid_market_without_writing(monkeypatch):
+    store = _Store(empty_ledger())
+    before = deepcopy(store.ledger)
+    monkeypatch.setattr("ppt.cli._store", lambda: store)
+
+    def fail_market():
+        raise MarketDataError("missing current prices: AVUV")
+
+    monkeypatch.setattr("ppt.cli.fetch_market", fail_market)
+
+    result = CliRunner().invoke(main, ["status"])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, MarketDataError)
+    assert store.ledger == before
+    assert store.recorded == []
 
 
 def test_plan_outputs_one_exact_signed_buy_command_without_writing(monkeypatch):

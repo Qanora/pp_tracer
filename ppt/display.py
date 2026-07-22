@@ -11,6 +11,19 @@ from rich.text import Text
 
 console = Console()
 
+_BUCKET_LABELS = {
+    "stock": "股票",
+    "bond": "债券",
+    "gold": "黄金",
+    "cash": "现金",
+}
+_CURRENCY_LABELS = {"USD": "美元", "CNY": "人民币"}
+_CORRIDOR_LABELS = {
+    "below": "低于 15%",
+    "within": "走廊内",
+    "above": "高于 35%",
+}
+
 
 def show_error(message: str) -> None:
     console.print(Text(f"错误：{message}", style="bold red"))
@@ -55,6 +68,98 @@ def show_recorded(batch: Mapping[str, Any], holdings: Mapping[str, int]) -> None
         )
     console.print(table)
     console.print(Text(f"批次净投入：¥{float(batch['net_cny']):,.2f}", style="green"))
+
+
+def show_status(
+    *,
+    total_value: float,
+    usdcny: float,
+    tickers: Sequence[Mapping[str, Any]],
+    buckets: Sequence[Mapping[str, Any]],
+    currencies: Sequence[Mapping[str, Any]],
+    deviations: Mapping[str, float],
+    corridor_breached: bool,
+) -> None:
+    """Show the current valuation and allocation without recommendations."""
+
+    overview = Table(title="组合当前状态", show_header=False)
+    overview.add_column("项目")
+    overview.add_column("当前值", justify="right")
+    overview.add_row("总市值", f"¥{total_value:,.2f}")
+    overview.add_row("USD/CNY", f"{usdcny:.4f}".rstrip("0").rstrip("."))
+    overview.add_row(
+        "跨桶走廊",
+        "暂无持仓" if total_value <= 0 else "已越界" if corridor_breached else "走廊内",
+    )
+    console.print(overview)
+
+    holdings = Table(title="当前持仓", show_lines=False)
+    holdings.add_column("桶")
+    holdings.add_column("标的")
+    holdings.add_column("持仓", justify="right")
+    holdings.add_column("原币现价", justify="right")
+    holdings.add_column("人民币市值", justify="right")
+    holdings.add_column("组合占比", justify="right")
+    holdings.add_column("桶内/目标", justify="right")
+    for row in tickers:
+        ticker = str(row["ticker"])
+        holdings.add_row(
+            _BUCKET_LABELS[str(row["bucket"])],
+            ticker,
+            str(int(row["shares"])),
+            f"{row['currency']} {_price(ticker, float(row['price']))}",
+            f"¥{float(row['value_cny']):,.2f}",
+            _optional_percent(row["portfolio_weight"]),
+            (
+                f"{_optional_compact_percent(row['bucket_weight'])}/"
+                f"{_compact_percent(float(row['bucket_target']))}"
+            ),
+        )
+    console.print(holdings)
+
+    bucket_table = Table(title="四桶配置")
+    bucket_table.add_column("桶")
+    bucket_table.add_column("人民币市值", justify="right")
+    bucket_table.add_column("当前占比", justify="right")
+    bucket_table.add_column("目标", justify="right")
+    bucket_table.add_column("偏差", justify="right")
+    bucket_table.add_column("走廊状态")
+    for row in buckets:
+        corridor = row["corridor"]
+        bucket_table.add_row(
+            _BUCKET_LABELS[str(row["bucket"])],
+            f"¥{float(row['value_cny']):,.2f}",
+            _optional_percent(row["weight"]),
+            _percent(float(row["target"])),
+            _optional_signed_percent(row["deviation"]),
+            "暂无持仓" if corridor is None else _CORRIDOR_LABELS[str(corridor)],
+        )
+    console.print(bucket_table)
+
+    currency_table = Table(title="币种配置")
+    currency_table.add_column("币种")
+    currency_table.add_column("人民币市值", justify="right")
+    currency_table.add_column("当前占比", justify="right")
+    currency_table.add_column("目标", justify="right")
+    currency_table.add_column("偏差", justify="right")
+    for row in currencies:
+        currency = str(row["currency"])
+        currency_table.add_row(
+            f"{_CURRENCY_LABELS[currency]} ({currency})",
+            f"¥{float(row['value_cny']):,.2f}",
+            _optional_percent(row["weight"]),
+            _percent(float(row["target"])),
+            _optional_signed_percent(row["deviation"]),
+        )
+    console.print(currency_table)
+
+    scores = Table(title="三级最大偏差", show_header=False)
+    scores.add_column("优先级")
+    scores.add_column("偏差", justify="right")
+    scores.add_row("四桶最大偏差", _percent(float(deviations["bucket"])))
+    scores.add_row("桶内最大偏差", _percent(float(deviations["intra"])))
+    scores.add_row("美元/人民币偏差", _percent(float(deviations["currency"])))
+    console.print(scores)
 
 
 def show_plan(
@@ -160,3 +265,20 @@ def _price(ticker: str, value: float) -> str:
 
 def _percent(value: float) -> str:
     return f"{value:.2%}"
+
+
+def _optional_percent(value: object) -> str:
+    return "—" if value is None else _percent(float(value))
+
+
+def _optional_signed_percent(value: object) -> str:
+    return "—" if value is None else f"{float(value):+.2%}"
+
+
+def _compact_percent(value: float) -> str:
+    percentage = value * 100
+    return f"{percentage:.0f}%" if percentage.is_integer() else f"{percentage:.2f}%"
+
+
+def _optional_compact_percent(value: object) -> str:
+    return "—" if value is None else _compact_percent(float(value))

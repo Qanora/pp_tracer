@@ -16,8 +16,6 @@ from ppt.constants import (
     BUCKET_ORDER,
     BUCKET_TICKERS,
     CNY_TICKERS,
-    CORRIDOR_LOWER,
-    CORRIDOR_UPPER,
     INTRA_BUCKET_SELL_THRESHOLD,
     TARGET_BUCKET_WEIGHT,
     TICKER_LOT_SIZE,
@@ -29,6 +27,7 @@ from ppt.valuation import (
     balance_score,
     bucket_values,
     bucket_weights,
+    is_corridor_breached,
     ticker_values_cny,
     total_value,
 )
@@ -93,12 +92,7 @@ def build_plan(
     before_ticker_values = ticker_values_cny(current, clean_prices, clean_rate)
     before_values = bucket_values(before_ticker_values)
     before_weights = bucket_weights(before_values)
-    portfolio_value = total_value(before_values)
-    corridor_breached = portfolio_value > 0 and any(
-        before_weights[bucket] < CORRIDOR_LOWER
-        or before_weights[bucket] > CORRIDOR_UPPER
-        for bucket in BUCKET_ORDER
-    )
+    corridor_breached = is_corridor_breached(before_values)
     cross_sell_buckets = frozenset(
         bucket
         for bucket in BUCKET_ORDER

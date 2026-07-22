@@ -1,9 +1,10 @@
-"""Thin command-line orchestration for the four target commands."""
+"""Thin command-line orchestration for the five target commands."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import asdict
 
 import click
 
@@ -15,6 +16,7 @@ from ppt.display import (
     show_initialized,
     show_plan,
     show_recorded,
+    show_status,
 )
 from ppt.holdings import (
     HoldingsStore,
@@ -27,7 +29,7 @@ from ppt.holdings import (
 from ppt.prices import fetch_market
 from ppt.rebalance import build_plan
 from ppt.returns import diagnostics, history_summary
-from ppt.valuation import bucket_values, ticker_values_cny, total_value
+from ppt.valuation import bucket_values, portfolio_snapshot, ticker_values_cny, total_value
 
 
 def _store() -> HoldingsStore:
@@ -140,6 +142,29 @@ def buy(trade_arguments: tuple[str, ...]) -> None:
     presentation = batch.to_dict()
     presentation["net_cny"] = batch_net_investment(batch)
     show_recorded(presentation, derive_holdings(ledger))
+
+
+@main.command()
+def status() -> None:
+    """展示当前持仓、估值、四桶和币种配置。"""
+    store = _store()
+    ledger = _require_ledger(store)
+    holdings = derive_holdings(ledger)
+    market = fetch_market()
+    snapshot = portfolio_snapshot(holdings, market.prices, market.usdcny)
+    show_status(
+        total_value=snapshot.total_value_cny,
+        usdcny=snapshot.usdcny,
+        tickers=[asdict(row) for row in snapshot.tickers],
+        buckets=[asdict(row) for row in snapshot.buckets],
+        currencies=[asdict(row) for row in snapshot.currencies],
+        deviations={
+            "bucket": snapshot.score.bucket_max,
+            "intra": snapshot.score.intra_max,
+            "currency": snapshot.score.currency,
+        },
+        corridor_breached=snapshot.corridor_breached,
+    )
 
 
 @main.command()

@@ -17,8 +17,11 @@ from ppt.constants import (
     BUCKET_ORDER,
     BUCKET_TICKERS,
     CNY_TICKERS,
+    CORRIDOR_LOWER,
+    CORRIDOR_UPPER,
     TARGET_BUCKET_WEIGHT,
     TARGET_CURRENCY_WEIGHT,
+    TICKER_CURRENCY,
     USD_TICKERS,
 )
 
@@ -47,6 +50,57 @@ class BalanceScore:
             self.intra_total,
             self.currency,
         )
+
+
+@dataclass(frozen=True)
+class TickerSnapshot:
+    """One fixed holding valued in CNY with its current allocation weights."""
+
+    bucket: str
+    ticker: str
+    currency: str
+    shares: int | float
+    price: float
+    value_cny: float
+    portfolio_weight: float | None
+    bucket_weight: float | None
+    bucket_target: float
+
+
+@dataclass(frozen=True)
+class BucketSnapshot:
+    """One strategic bucket's current value, target, and corridor position."""
+
+    bucket: str
+    value_cny: float
+    weight: float | None
+    target: float
+    deviation: float | None
+    corridor: str | None
+
+
+@dataclass(frozen=True)
+class CurrencySnapshot:
+    """One currency's CNY-equivalent value and allocation weight."""
+
+    currency: str
+    value_cny: float
+    weight: float | None
+    target: float
+    deviation: float | None
+
+
+@dataclass(frozen=True)
+class PortfolioSnapshot:
+    """Complete read-only current portfolio state for terminal presentation."""
+
+    total_value_cny: float
+    usdcny: float
+    tickers: tuple[TickerSnapshot, ...]
+    buckets: tuple[BucketSnapshot, ...]
+    currencies: tuple[CurrencySnapshot, ...]
+    score: BalanceScore
+    corridor_breached: bool
 
 
 def ticker_values_cny(
@@ -97,6 +151,18 @@ def equal_target_weights() -> dict[str, float]:
     """Return the immutable four-bucket strategic target."""
 
     return {bucket: TARGET_BUCKET_WEIGHT for bucket in BUCKET_ORDER}
+
+
+def is_corridor_breached(bucket_vals: dict[str, float]) -> bool:
+    """Return whether a non-empty portfolio is outside the fixed 15%-35% corridor."""
+
+    if total_value(bucket_vals) <= 0:
+        return False
+    weights = bucket_weights(bucket_vals)
+    return any(
+        weights[bucket] < CORRIDOR_LOWER or weights[bucket] > CORRIDOR_UPPER
+        for bucket in BUCKET_ORDER
+    )
 
 
 def currency_split(
@@ -158,4 +224,82 @@ def balance_score(
         intra_max=max(intra_deviations, default=0.0),
         intra_total=sum(intra_deviations),
         currency=currency_deviation,
+    )
+
+
+def portfolio_snapshot(
+    holdings: dict[str, int | float],
+    prices: dict[str, float],
+    usdcny: float,
+) -> PortfolioSnapshot:
+    """Build the complete current allocation snapshot without IO or planning."""
+
+    ticker_vals = ticker_values_cny(holdings, prices, usdcny)
+    bucket_vals = bucket_values(ticker_vals)
+    total = total_value(bucket_vals)
+    weights = bucket_weights(bucket_vals)
+
+    ticker_rows: list[TickerSnapshot] = []
+    for bucket in BUCKET_ORDER:
+        bucket_total = bucket_vals[bucket]
+        target = 1.0 / len(BUCKET_TICKERS[bucket])
+        for ticker in BUCKET_TICKERS[bucket]:
+            value = ticker_vals[ticker]
+            ticker_rows.append(
+                TickerSnapshot(
+                    bucket=bucket,
+                    ticker=ticker,
+                    currency=TICKER_CURRENCY[ticker],
+                    shares=holdings.get(ticker, 0),
+                    price=prices[ticker],
+                    value_cny=value,
+                    portfolio_weight=value / total if total > 0 else None,
+                    bucket_weight=value / bucket_total if bucket_total > 0 else None,
+                    bucket_target=target,
+                )
+            )
+    bucket_rows = tuple(
+        BucketSnapshot(
+            bucket=bucket,
+            value_cny=bucket_vals[bucket],
+            weight=weights[bucket] if total > 0 else None,
+            target=TARGET_BUCKET_WEIGHT,
+            deviation=weights[bucket] - TARGET_BUCKET_WEIGHT if total > 0 else None,
+            corridor=(
+                None
+                if total <= 0
+                else "below"
+                if weights[bucket] < CORRIDOR_LOWER
+                else "above"
+                if weights[bucket] > CORRIDOR_UPPER
+                else "within"
+            ),
+        )
+        for bucket in BUCKET_ORDER
+    )
+
+    split = currency_split(holdings, prices, usdcny)
+    currency_rows = tuple(
+        CurrencySnapshot(
+            currency=currency,
+            value_cny=split[currency.lower()],
+            weight=split[currency.lower()] / split["total"] if split["total"] > 0 else None,
+            target=TARGET_CURRENCY_WEIGHT,
+            deviation=(
+                split[currency.lower()] / split["total"] - TARGET_CURRENCY_WEIGHT
+                if split["total"] > 0
+                else None
+            ),
+        )
+        for currency in ("USD", "CNY")
+    )
+
+    return PortfolioSnapshot(
+        total_value_cny=total,
+        usdcny=usdcny,
+        tickers=tuple(ticker_rows),
+        buckets=bucket_rows,
+        currencies=currency_rows,
+        score=balance_score(holdings, prices, usdcny),
+        corridor_breached=is_corridor_breached(bucket_vals),
     )

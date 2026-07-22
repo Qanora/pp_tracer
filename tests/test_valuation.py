@@ -9,6 +9,8 @@ from ppt.valuation import (
     bucket_weights,
     currency_split,
     equal_target_weights,
+    is_corridor_breached,
+    portfolio_snapshot,
     ticker_values_cny,
     total_value,
 )
@@ -87,3 +89,39 @@ def test_empty_portfolio_has_explicit_deviations() -> None:
     score = balance_score({}, PRICES, usdcny=1.0)
 
     assert score.as_tuple() == pytest.approx((0.25, 1.0, 0.0, 0.0, 0.5))
+
+
+def test_portfolio_snapshot_contains_ticker_bucket_currency_and_score_facts() -> None:
+    snapshot = portfolio_snapshot(balanced_holdings(), PRICES, usdcny=1.0)
+
+    assert snapshot.total_value_cny == pytest.approx(40_000.0)
+    assert [row.ticker for row in snapshot.tickers] == [
+        "SPYM",
+        "AVUV",
+        "VGIT",
+        "GLDM",
+        "518880.SS",
+        "SGOV",
+        "511360.SS",
+    ]
+    assert [row.weight for row in snapshot.buckets] == pytest.approx([0.25] * 4)
+    assert [row.weight for row in snapshot.currencies] == pytest.approx([0.75, 0.25])
+    assert snapshot.score.as_tuple() == pytest.approx((0.0, 0.0, 0.0, 0.0, 0.25))
+    assert snapshot.corridor_breached is False
+
+
+def test_empty_portfolio_snapshot_marks_undefined_weights() -> None:
+    snapshot = portfolio_snapshot({}, PRICES, usdcny=1.0)
+
+    assert snapshot.total_value_cny == 0.0
+    assert all(row.portfolio_weight is None for row in snapshot.tickers)
+    assert all(row.bucket_weight is None for row in snapshot.tickers)
+    assert all(row.weight is None and row.corridor is None for row in snapshot.buckets)
+    assert all(row.weight is None for row in snapshot.currencies)
+    assert snapshot.corridor_breached is False
+
+
+def test_corridor_boundaries_are_inclusive() -> None:
+    assert is_corridor_breached({"stock": 15, "bond": 35, "gold": 25, "cash": 25}) is False
+    assert is_corridor_breached({"stock": 14, "bond": 36, "gold": 25, "cash": 25}) is True
+    assert is_corridor_breached({"stock": 0, "bond": 0, "gold": 0, "cash": 0}) is False

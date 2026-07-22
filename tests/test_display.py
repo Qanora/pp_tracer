@@ -3,6 +3,79 @@
 from ppt import display
 
 
+def test_status_output_contains_current_holdings_and_allocations():
+    with display.console.capture() as capture:
+        display.show_status(
+            total_value=40_000.0,
+            usdcny=1.0,
+            tickers=[
+                {
+                    "bucket": "stock",
+                    "ticker": "SPYM",
+                    "currency": "USD",
+                    "shares": 50,
+                    "price": 100.0,
+                    "value_cny": 5_000.0,
+                    "portfolio_weight": 0.125,
+                    "bucket_weight": 0.5,
+                    "bucket_target": 0.5,
+                },
+                {
+                    "bucket": "gold",
+                    "ticker": "518880.SS",
+                    "currency": "CNY",
+                    "shares": 5000,
+                    "price": 1.0,
+                    "value_cny": 5_000.0,
+                    "portfolio_weight": 0.125,
+                    "bucket_weight": 0.5,
+                    "bucket_target": 0.5,
+                },
+            ],
+            buckets=[
+                {
+                    "bucket": bucket,
+                    "value_cny": 10_000.0,
+                    "weight": 0.25,
+                    "target": 0.25,
+                    "deviation": 0.0,
+                    "corridor": "within",
+                }
+                for bucket in ("stock", "bond", "gold", "cash")
+            ],
+            currencies=[
+                {
+                    "currency": "USD",
+                    "value_cny": 30_000.0,
+                    "weight": 0.75,
+                    "target": 0.5,
+                    "deviation": 0.25,
+                },
+                {
+                    "currency": "CNY",
+                    "value_cny": 10_000.0,
+                    "weight": 0.25,
+                    "target": 0.5,
+                    "deviation": -0.25,
+                },
+            ],
+            deviations={"bucket": 0.0, "intra": 0.0, "currency": 0.25},
+            corridor_breached=False,
+        )
+
+    output = capture.get()
+    assert "组合当前状态" in output
+    assert "当前持仓" in output
+    assert "SPYM" in output
+    assert "518880.SS" in output
+    assert "USD $100" in output
+    assert "CNY ¥1" in output
+    assert "四桶配置" in output
+    assert "币种配置" in output
+    assert "三级最大偏差" in output
+    assert "¥40,000.00" in output
+
+
 def test_plan_output_contains_cash_scores_and_exact_command():
     with display.console.capture() as capture:
         display.show_plan(
