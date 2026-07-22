@@ -8,9 +8,10 @@ from dataclasses import asdict
 
 import click
 
-from ppt.constants import BUCKET_ORDER, BUCKET_TICKERS, CNY_TICKERS, TICKER_ORDER
+from ppt.constants import CNY_TICKERS, TICKER_ORDER
 from ppt.display import (
     confirm_reset,
+    format_trade_price,
     show_error,
     show_history,
     show_initialized,
@@ -23,13 +24,18 @@ from ppt.holdings import (
     LedgerNotInitializedError,
     Trade,
     batch_net_investment,
+    cash_summary,
     derive_holdings,
     ledger_batches,
 )
 from ppt.prices import fetch_market
 from ppt.rebalance import build_plan
-from ppt.returns import diagnostics, history_summary
-from ppt.valuation import bucket_values, portfolio_snapshot, ticker_values_cny, total_value
+from ppt.returns import diagnostics, performance_summary
+from ppt.valuation import (
+    current_holdings_backtest,
+    current_holdings_bucket_history,
+    portfolio_snapshot,
+)
 
 
 def _store() -> HoldingsStore:
@@ -64,30 +70,6 @@ def _parse_batch(arguments: Sequence[str]) -> tuple[Trade, ...]:
     return trades
 
 
-def _bucket_history(ticker_history: dict[str, Sequence[float]]) -> dict[str, Sequence[float]]:
-    """Use each bucket's first fixed ticker as its stable diagnostic proxy."""
-    return {
-        bucket: ticker_history.get(BUCKET_TICKERS[bucket][0], ())
-        for bucket in BUCKET_ORDER
-    }
-
-
-def _diagnostic_lines(ticker_history: dict[str, Sequence[float]]) -> list[str]:
-    result = diagnostics(_bucket_history(ticker_history))
-    direction_text = {"up": "上行", "down": "下行", "flat": "横盘", None: "数据不足"}
-    lines = [
-        f"{bucket} 趋势：{direction_text[result.trends[bucket]]}"
-        for bucket in BUCKET_ORDER
-    ]
-    lines.extend(
-        f"{warning.first}/{warning.second} 相关性异常：{warning.correlation:+.2f}"
-        for warning in result.correlations
-    )
-    if not result.correlations:
-        lines.append("未发现相关性异常（数据不足时不作判断）")
-    return lines
-
-
 def _trade_rows(trades: dict[str, int], prices: dict[str, float], usdcny: float) -> list[dict]:
     rows: list[dict] = []
     for ticker in TICKER_ORDER:
@@ -108,7 +90,7 @@ def _trade_rows(trades: dict[str, int], prices: dict[str, float], usdcny: float)
 
 def _buy_command(trades: dict[str, int], prices: dict[str, float]) -> str | None:
     parts = [
-        f"'{ticker}#{trades[ticker]:+d}@{prices[ticker]!r}'"
+        f"'{ticker}#{trades[ticker]:+d}@{format_trade_price(ticker, prices[ticker])}'"
         for ticker in TICKER_ORDER
         if trades.get(ticker, 0) != 0
     ]
@@ -146,14 +128,29 @@ def buy(trade_arguments: tuple[str, ...]) -> None:
 
 @main.command()
 def status() -> None:
-    """展示当前持仓、估值、四桶和币种配置。"""
+    """展示当前持仓、配置、收益和风险。"""
     store = _store()
     ledger = _require_ledger(store)
     holdings = derive_holdings(ledger)
-    market = fetch_market()
+    market = fetch_market(with_history=True)
     snapshot = portfolio_snapshot(holdings, market.prices, market.usdcny)
+    cash = cash_summary(ledger)
+    performance = performance_summary(
+        cash["cash_in"], cash["cash_out"], snapshot.total_value_cny
+    )
+    backtest = current_holdings_backtest(
+        holdings,
+        market.history,
+        market.usdcny_history,
+    )
+    diagnostic_report = diagnostics(
+        current_holdings_bucket_history(
+            holdings,
+            market.history,
+            market.usdcny_history,
+        )
+    )
     show_status(
-        total_value=snapshot.total_value_cny,
         usdcny=snapshot.usdcny,
         tickers=[asdict(row) for row in snapshot.tickers],
         buckets=[asdict(row) for row in snapshot.buckets],
@@ -164,6 +161,15 @@ def status() -> None:
             "currency": snapshot.score.currency,
         },
         corridor_breached=snapshot.corridor_breached,
+        performance=asdict(performance),
+        backtest=asdict(backtest),
+        diagnostics={
+            "trends": diagnostic_report.trends,
+            "correlation_pairs": diagnostic_report.correlation_pairs,
+            "correlations": [
+                asdict(warning) for warning in diagnostic_report.correlations
+            ],
+        },
     )
 
 
@@ -194,33 +200,25 @@ def plan(amount: float) -> None:
             "intra": result.after_score.intra_max,
             "currency": result.after_score.currency,
         },
-        diagnostics=_diagnostic_lines(market.history),
         command=_buy_command(result.trades, market.prices),
     )
 
 
 @main.command()
 def history() -> None:
-    """展示收益汇总和按批次倒序的有符号交易记录。"""
+    """展示资金流汇总和按批次倒序的有符号交易记录。"""
     store = _store()
     ledger = _require_ledger(store)
-    holdings = derive_holdings(ledger)
-    market = fetch_market()
-    current_value = total_value(
-        bucket_values(ticker_values_cny(holdings, market.prices, market.usdcny))
-    )
-    summary = history_summary(ledger["batches"], current_value)
+    cash = cash_summary(ledger)
     batches = []
     for batch in ledger_batches(ledger):
         item = batch.to_dict()
         item["net_cny"] = batch_net_investment(batch)
         batches.append(item)
     show_history(
-        cash_in=summary.invested,
-        cash_out=summary.withdrawn,
-        market_value=summary.current_value,
-        profit=summary.profit,
-        return_rate=summary.return_rate,
+        cash_in=cash["cash_in"],
+        cash_out=cash["cash_out"],
+        net_invested=cash["cash_in"] - cash["cash_out"],
         batches=batches,
     )
 

@@ -11,7 +11,10 @@ This module deliberately contains no IO, configuration, or presentation code.
 
 from __future__ import annotations
 
+import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 
 from ppt.constants import (
     BUCKET_ORDER,
@@ -19,6 +22,7 @@ from ppt.constants import (
     CNY_TICKERS,
     CORRIDOR_LOWER,
     CORRIDOR_UPPER,
+    HISTORY_WINDOW_DAYS,
     TARGET_BUCKET_WEIGHT,
     TARGET_CURRENCY_WEIGHT,
     TICKER_CURRENCY,
@@ -101,6 +105,183 @@ class PortfolioSnapshot:
     currencies: tuple[CurrencySnapshot, ...]
     score: BalanceScore
     corridor_breached: bool
+
+
+@dataclass(frozen=True)
+class HoldingsBacktestSummary:
+    """Drawdown and run-up of today's fixed holdings over 30 trading days."""
+
+    current_drawdown: float | None
+    maximum_drawdown: float | None
+    maximum_runup: float | None
+    observations: int
+
+
+def current_holdings_backtest(
+    holdings: Mapping[str, int | float],
+    history: Mapping[str, Mapping[date, float]],
+    usdcny_history: Mapping[date, float],
+) -> HoldingsBacktestSummary:
+    """Replay today's holdings over the latest 30 exact common trading dates.
+
+    Share counts remain fixed throughout the replay.  Each USD close is
+    converted using that date's USD/CNY rate.  Missing required history or
+    fewer than 30 common observations make the result unavailable; malformed
+    or non-finite financial data is rejected.
+    """
+
+    selected = _positive_holdings(holdings)
+    if not selected:
+        return _unavailable_backtest(0)
+
+    value_history = _fixed_holdings_history(selected, history, usdcny_history)
+    if value_history is None:
+        return _unavailable_backtest(0)
+    available_observations = len(value_history)
+    if available_observations < HISTORY_WINDOW_DAYS:
+        return _unavailable_backtest(available_observations)
+    values = [
+        value_history[day]
+        for day in sorted(value_history)[-HISTORY_WINDOW_DAYS:]
+    ]
+
+    peak = values[0]
+    trough = values[0]
+    drawdowns: list[float] = []
+    runups: list[float] = []
+    for value in values:
+        peak = max(peak, value)
+        trough = min(trough, value)
+        drawdown = value / peak - 1.0
+        runup = value / trough - 1.0
+        if not math.isfinite(drawdown) or not math.isfinite(runup):
+            raise ValueError("non-finite backtest metric")
+        drawdowns.append(min(0.0, drawdown))
+        runups.append(max(0.0, runup))
+
+    return HoldingsBacktestSummary(
+        current_drawdown=drawdowns[-1],
+        maximum_drawdown=min(drawdowns),
+        maximum_runup=max(runups),
+        observations=len(values),
+    )
+
+
+def current_holdings_bucket_history(
+    holdings: Mapping[str, int | float],
+    history: Mapping[str, Mapping[date, float]],
+    usdcny_history: Mapping[date, float],
+) -> dict[str, dict[date, float]]:
+    """Return each current bucket's dated CNY value curve.
+
+    Empty buckets and buckets missing any required close or historical FX
+    series are returned as empty mappings so advisory diagnostics can degrade
+    independently. Malformed supplied financial data remains an error.
+    """
+
+    selected = _positive_holdings(holdings)
+    by_bucket: dict[str, dict[date, float]] = {}
+    for bucket in BUCKET_ORDER:
+        bucket_tickers = set(BUCKET_TICKERS[bucket])
+        bucket_holdings = tuple(
+            (ticker, shares)
+            for ticker, shares in selected
+            if ticker in bucket_tickers
+        )
+        curve = _fixed_holdings_history(
+            bucket_holdings,
+            history,
+            usdcny_history,
+        )
+        by_bucket[bucket] = curve or {}
+    return by_bucket
+
+
+def _unavailable_backtest(observations: int) -> HoldingsBacktestSummary:
+    return HoldingsBacktestSummary(
+        current_drawdown=None,
+        maximum_drawdown=None,
+        maximum_runup=None,
+        observations=observations,
+    )
+
+
+def _positive_holdings(
+    holdings: Mapping[str, int | float],
+) -> tuple[tuple[str, float], ...]:
+    selected: list[tuple[str, float]] = []
+    for ticker, shares in holdings.items():
+        if ticker not in TICKER_CURRENCY:
+            raise ValueError(f"unknown holding ticker: {ticker}")
+        if (
+            isinstance(shares, bool)
+            or not isinstance(shares, (int, float))
+            or not math.isfinite(shares)
+            or shares < 0
+        ):
+            raise ValueError(f"invalid holding shares for {ticker}: {shares}")
+        if shares > 0:
+            selected.append((ticker, float(shares)))
+    return tuple(selected)
+
+
+def _fixed_holdings_history(
+    selected: tuple[tuple[str, float], ...],
+    history: Mapping[str, Mapping[date, float]],
+    usdcny_history: Mapping[date, float],
+) -> dict[date, float] | None:
+    if not selected:
+        return {}
+
+    required: list[Mapping[date, float]] = []
+    for ticker, _shares in selected:
+        prices = history.get(ticker)
+        if not isinstance(prices, Mapping) or not prices:
+            return None
+        _validate_dated_values(prices, f"historical price for {ticker}")
+        required.append(prices)
+
+    needs_fx = any(TICKER_CURRENCY[ticker] == "USD" for ticker, _ in selected)
+    if needs_fx:
+        if not isinstance(usdcny_history, Mapping) or not usdcny_history:
+            return None
+        _validate_dated_values(usdcny_history, "historical USD/CNY rate")
+        required.append(usdcny_history)
+
+    common_dates = set(required[0])
+    for series in required[1:]:
+        common_dates.intersection_update(series)
+
+    values: dict[date, float] = {}
+    for day in sorted(common_dates):
+        components = [
+            shares
+            * float(history[ticker][day])
+            * (
+                float(usdcny_history[day])
+                if TICKER_CURRENCY[ticker] == "USD"
+                else 1.0
+            )
+            for ticker, shares in selected
+        ]
+        value = math.fsum(components)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"invalid portfolio value on {day.isoformat()}: {value}")
+        values[day] = value
+    return values
+
+
+def _validate_dated_values(values: Mapping[date, float], label: str) -> None:
+    for day, value in values.items():
+        if type(day) is not date:
+            raise ValueError(f"invalid date in {label}: {day}")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"invalid {label} on {day.isoformat()}: {value}")
 
 
 def ticker_values_cny(

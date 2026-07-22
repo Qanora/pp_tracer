@@ -1,6 +1,6 @@
 """All user-facing terminal components."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import click
@@ -72,24 +72,36 @@ def show_recorded(batch: Mapping[str, Any], holdings: Mapping[str, int]) -> None
 
 def show_status(
     *,
-    total_value: float,
     usdcny: float,
     tickers: Sequence[Mapping[str, Any]],
     buckets: Sequence[Mapping[str, Any]],
     currencies: Sequence[Mapping[str, Any]],
     deviations: Mapping[str, float],
     corridor_breached: bool,
+    performance: Mapping[str, Any],
+    backtest: Mapping[str, Any],
+    diagnostics: Mapping[str, Any],
 ) -> None:
-    """Show the current valuation and allocation without recommendations."""
+    """Show the current valuation, allocation, performance, and risk."""
 
+    current_value = float(performance["current_value"])
     overview = Table(title="组合当前状态", show_header=False)
     overview.add_column("项目")
     overview.add_column("当前值", justify="right")
-    overview.add_row("总市值", f"¥{total_value:,.2f}")
+    overview.add_row("当前市值", f"¥{current_value:,.2f}")
+    overview.add_row("累计投入", f"¥{float(performance['invested']):,.2f}")
+    overview.add_row("累计取出", f"¥{float(performance['withdrawn']):,.2f}")
+    overview.add_row("净投入", f"¥{float(performance['net_invested']):,.2f}")
+    overview.add_row("累计盈亏", f"¥{float(performance['profit']):+,.2f}")
+    return_rate = performance["return_rate"]
+    overview.add_row(
+        "简单收益率",
+        "不可计算" if return_rate is None else f"{float(return_rate):+.2%}",
+    )
     overview.add_row("USD/CNY", f"{usdcny:.4f}".rstrip("0").rstrip("."))
     overview.add_row(
         "跨桶走廊",
-        "暂无持仓" if total_value <= 0 else "已越界" if corridor_breached else "走廊内",
+        "暂无持仓" if current_value <= 0 else "已越界" if corridor_breached else "走廊内",
     )
     console.print(overview)
 
@@ -161,6 +173,28 @@ def show_status(
     scores.add_row("美元/人民币偏差", _percent(float(deviations["currency"])))
     console.print(scores)
 
+    backtest_table = Table(title="30 日持仓回测", show_header=False)
+    backtest_table.add_column("指标")
+    backtest_table.add_column("幅度", justify="right")
+    for label, key in (
+        ("当前回撤", "current_drawdown"),
+        ("最大回撤", "maximum_drawdown"),
+        ("最大涨幅", "maximum_runup"),
+    ):
+        value = backtest[key]
+        backtest_table.add_row(
+            label,
+            "不可计算" if value is None else _percent(float(value)),
+        )
+    observations = int(backtest["observations"])
+    if observations:
+        backtest_table.caption = f"共同有效交易日：{observations}/30"
+    console.print(backtest_table)
+
+    hints = _diagnostic_lines(diagnostics)
+    if hints:
+        console.print(Panel("\n".join(hints), title="趋势与相关性提示", border_style="yellow"))
+
 
 def show_plan(
     *,
@@ -171,7 +205,6 @@ def show_plan(
     unused_amount: float,
     before: Mapping[str, float],
     after: Mapping[str, float],
-    diagnostics: Iterable[str],
     command: str | None,
 ) -> None:
     console.print(Text("自动均衡交易方案", style="bold cyan"))
@@ -213,9 +246,6 @@ def show_plan(
     scores.add_row("美元/人民币偏差", _percent(before["currency"]), _percent(after["currency"]))
     console.print(scores)
 
-    hints = list(diagnostics)
-    if hints:
-        console.print(Panel("\n".join(hints), title="趋势与相关性提示", border_style="yellow"))
     if command:
         console.print(Panel(Text(command, style="bold cyan"), title="执行命令"))
 
@@ -224,26 +254,22 @@ def show_history(
     *,
     cash_in: float,
     cash_out: float,
-    market_value: float,
-    profit: float,
-    return_rate: float | None,
+    net_invested: float,
     batches: Sequence[Mapping[str, Any]],
 ) -> None:
-    summary = Table(title="持仓收益汇总", show_header=False)
+    summary = Table(title="资金流汇总", show_header=False)
     summary.add_column("项目")
     summary.add_column("金额", justify="right")
     summary.add_row("累计投入", f"¥{cash_in:,.2f}")
     summary.add_row("累计取出", f"¥{cash_out:,.2f}")
-    summary.add_row("当前市值", f"¥{market_value:,.2f}")
-    summary.add_row("收益额", f"¥{profit:+,.2f}")
-    summary.add_row("收益率", "不可计算" if return_rate is None else f"{return_rate:+.2%}")
+    summary.add_row("净投入", f"¥{net_invested:,.2f}")
     console.print(summary)
 
     if not batches:
         show_info("暂无交易记录。")
         return
     for batch in reversed(batches):
-        table = Table(title=str(batch["executed_at"]), show_lines=False)
+        table = Table(title=str(batch["executed_at"]), show_lines=False, expand=True)
         table.add_column("标的")
         table.add_column("股数", justify="right")
         table.add_column("成交价", justify="right")
@@ -260,7 +286,45 @@ def show_history(
 
 def _price(ticker: str, value: float) -> str:
     symbol = "¥" if ticker.endswith(".SS") else "$"
-    return f"{symbol}{value:.4f}".rstrip("0").rstrip(".")
+    return f"{symbol}{format_trade_price(ticker, value)}"
+
+
+def format_trade_price(ticker: str, value: float) -> str:
+    """Format a trade price at the fixed precision of its market."""
+    decimals = 3 if ticker.endswith(".SS") else 2
+    return f"{value:.{decimals}f}"
+
+
+def _diagnostic_lines(report: Mapping[str, Any]) -> list[str]:
+    direction_labels = {
+        "up": "上行",
+        "down": "下行",
+        "flat": "横盘",
+        None: "数据不足",
+    }
+    trends = report["trends"]
+    lines = [
+        f"{_BUCKET_LABELS[bucket]}趋势：{direction_labels[trends[bucket]]}"
+        for bucket in _BUCKET_LABELS
+    ]
+    correlations = report["correlations"]
+    lines.extend(
+        (
+            f"{_BUCKET_LABELS[str(item['first'])]}/"
+            f"{_BUCKET_LABELS[str(item['second'])]}相关性异常："
+            f"{float(item['correlation']):+.2f}"
+        )
+        for item in correlations
+    )
+    available_pairs = int(report["correlation_pairs"])
+    total_pairs = len(_BUCKET_LABELS) * (len(_BUCKET_LABELS) - 1) // 2
+    if available_pairs == 0:
+        lines.append("相关性：数据不足")
+    elif not correlations:
+        lines.append("未发现相关性异常")
+    if 0 < available_pairs < total_pairs:
+        lines.append(f"相关性覆盖：{available_pairs}/{total_pairs} 组，其余数据不足")
+    return lines
 
 
 def _percent(value: float) -> str:

@@ -42,10 +42,12 @@ class _LeaseRunner:
             self.objects[key] = payload
             return _result()
         if arguments[1:3] == ["api", "list-objects-v2"]:
+            assert "--quiet" in arguments
             prefix = arguments[arguments.index("--prefix") + 1]
             contents = [{"Key": key} for key in sorted(self.objects) if key.startswith(prefix)]
             return _result(stdout=json.dumps({"Contents": contents, "IsTruncated": False}))
         if arguments[1] == "cat":
+            assert arguments[-1] == "--quiet"
             key = arguments[2].removeprefix("oss://bucket/")
             if key not in self.objects:
                 return _result(1, stderr="NoSuchKey status code: 404")
@@ -82,6 +84,22 @@ def test_read_rejects_invalid_or_non_object_json():
     with patch("ppt.storage.subprocess.run", return_value=_result(stdout="not-json")):
         with pytest.raises(StoredDataError):
             backend.read("oss://bucket/ledger.json")
+
+
+def test_read_uses_quiet_output_for_machine_readable_json():
+    backend = OssBackend("ossutil-test")
+    with patch(
+        "ppt.storage.subprocess.run",
+        return_value=_result(stdout='{"value":1}'),
+    ) as run:
+        assert backend.read("oss://bucket/ledger.json") == {"value": 1}
+
+    assert run.call_args.args[0] == [
+        "ossutil-test",
+        "cat",
+        "oss://bucket/ledger.json",
+        "--quiet",
+    ]
 
     with patch("ppt.storage.subprocess.run", return_value=_result(stdout="[]")):
         with pytest.raises(StoredDataError):

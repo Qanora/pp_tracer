@@ -3,10 +3,15 @@
 from ppt import display
 
 
+def test_trade_prices_use_fixed_market_precision():
+    assert display.format_trade_price("SGOV", 100.60009765625) == "100.60"
+    assert display.format_trade_price("SPYM", 88.13500213623047) == "88.14"
+    assert display.format_trade_price("518880.SS", 8.5600004196167) == "8.560"
+
+
 def test_status_output_contains_current_holdings_and_allocations():
     with display.console.capture() as capture:
         display.show_status(
-            total_value=40_000.0,
             usdcny=1.0,
             tickers=[
                 {
@@ -61,6 +66,30 @@ def test_status_output_contains_current_holdings_and_allocations():
             ],
             deviations={"bucket": 0.0, "intra": 0.0, "currency": 0.25},
             corridor_breached=False,
+            performance={
+                "invested": 35_000.0,
+                "withdrawn": 0.0,
+                "net_invested": 35_000.0,
+                "current_value": 40_000.0,
+                "profit": 5_000.0,
+                "return_rate": 1 / 7,
+            },
+            backtest={
+                "current_drawdown": -0.05,
+                "maximum_drawdown": -0.12,
+                "maximum_runup": 0.18,
+                "observations": 30,
+            },
+            diagnostics={
+                "trends": {
+                    "stock": "up",
+                    "bond": "flat",
+                    "gold": "down",
+                    "cash": None,
+                },
+                "correlation_pairs": 3,
+                "correlations": [],
+            },
         )
 
     output = capture.get()
@@ -68,12 +97,38 @@ def test_status_output_contains_current_holdings_and_allocations():
     assert "当前持仓" in output
     assert "SPYM" in output
     assert "518880.SS" in output
-    assert "USD $100" in output
-    assert "CNY ¥1" in output
+    assert "USD $100.00" in output
+    assert "CNY ¥1.000" in output
     assert "四桶配置" in output
     assert "币种配置" in output
     assert "三级最大偏差" in output
     assert "¥40,000.00" in output
+    assert "累计盈亏" in output
+    assert "+14.29%" in output
+    assert "当前回撤" in output
+    assert "-5.00%" in output
+    assert "最大回撤" in output
+    assert "-12.00%" in output
+    assert "最大涨幅" in output
+    assert "18.00%" in output
+    assert "股票趋势：上行" in output
+    assert "相关性覆盖：3/6 组，其余数据不足" in output
+
+
+def test_diagnostics_distinguish_unavailable_from_no_warning():
+    trends = {bucket: None for bucket in ("stock", "bond", "gold", "cash")}
+
+    unavailable = display._diagnostic_lines(
+        {"trends": trends, "correlation_pairs": 0, "correlations": []}
+    )
+    clear = display._diagnostic_lines(
+        {"trends": trends, "correlation_pairs": 6, "correlations": []}
+    )
+
+    assert "相关性：数据不足" in unavailable
+    assert "未发现相关性异常" not in unavailable
+    assert "未发现相关性异常" in clear
+    assert "相关性：数据不足" not in clear
 
 
 def test_plan_output_contains_cash_scores_and_exact_command():
@@ -99,14 +154,13 @@ def test_plan_output_contains_cash_scores_and_exact_command():
             unused_amount=640.0,
             before={"bucket": 0.2, "intra": 0.1, "currency": 0.3},
             after={"bucket": 0.1, "intra": 0.05, "currency": 0.2},
-            diagnostics=["股票趋势：上行"],
             command="ppt buy SPYM#2@75.0 SGOV#-1@100.0",
         )
 
     output = capture.get()
     assert "未使用金额" in output
     assert "四桶最大偏差" in output
-    assert "股票趋势：上行" in output
+    assert "趋势与相关性提示" not in output
     assert "ppt buy SPYM#2@75.0 SGOV#-1@100.0" in output
 
 
@@ -118,7 +172,7 @@ def test_history_keeps_signed_shares_and_reverse_batch_order():
             "trades": [{"ticker": "SPYM", "shares": 1, "price": 10.0}],
         },
         {
-            "executed_at": "2026-01-02T00:00:00+08:00",
+            "executed_at": "2026-01-02T00:00:00.123456+08:00",
             "net_cny": -50.0,
             "trades": [{"ticker": "SPYM", "shares": -1, "price": 11.0}],
         },
@@ -127,14 +181,15 @@ def test_history_keeps_signed_shares_and_reverse_batch_order():
         display.show_history(
             cash_in=100.0,
             cash_out=50.0,
-            market_value=0.0,
-            profit=-50.0,
-            return_rate=-0.5,
+            net_invested=50.0,
             batches=batches,
         )
 
     output = capture.get()
+    assert "2026-01-02T00:00:00.123456+08:00" in output
     assert output.index("2026-01-02") < output.index("2026-01-01")
     assert "+1" in output
     assert "-1" in output
-    assert "-50.00%" in output
+    assert "资金流汇总" in output
+    assert "净投入" in output
+    assert "收益率" not in output

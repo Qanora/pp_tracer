@@ -150,7 +150,7 @@ class OssBackend:
 
     def read(self, oss_path: str) -> dict[str, Any]:
         self._split_path(oss_path)
-        result = self._invoke([self.ossutil, "cat", oss_path])
+        result = self._invoke([self.ossutil, "cat", oss_path, "--quiet"])
         if result.returncode != 0:
             if self._matches(result, self._NOT_FOUND_MARKERS):
                 raise ObjectNotFoundError(f"OSS object not found: {oss_path}")
@@ -297,6 +297,7 @@ class OssBackend:
                 "1000",
                 "--output-format",
                 "json",
+                "--quiet",
             ]
             if continuation_token is not None:
                 arguments.extend(["--continuation-token", continuation_token])
