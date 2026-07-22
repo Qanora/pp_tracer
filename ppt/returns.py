@@ -1,26 +1,26 @@
-"""Pure transaction-history summaries and market diagnostics."""
+"""Pure portfolio-performance summaries and market diagnostics."""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from itertools import combinations
 
 from ppt.constants import (
     BUCKET_ORDER,
     CORRELATION_MIN_POINTS,
     CORRELATION_WARNING,
-    TICKER_CURRENCY,
-    TICKER_WHITELIST,
+    HISTORY_WINDOW_DAYS,
     TREND_LONG_WINDOW,
     TREND_SHORT_WINDOW,
 )
 
 
 @dataclass(frozen=True)
-class HistorySummary:
-    """Cash-flow and simple-return summary shown above transaction history."""
+class PerformanceSummary:
+    """Cash-flow and simple-return facts for the current portfolio."""
 
     invested: float
     withdrawn: float
@@ -45,87 +45,54 @@ class Diagnostics:
 
     trends: dict[str, str | None]
     correlations: tuple[CorrelationWarning, ...]
+    correlation_pairs: int
 
 
-def history_summary(transactions: list[dict], current_value: float) -> HistorySummary:
-    """Summarize signed transaction batches in CNY.
+def performance_summary(
+    invested: float,
+    withdrawn: float,
+    current_value: float,
+) -> PerformanceSummary:
+    """Return cumulative cash-flow, profit, and simple-return facts.
 
-    A batch may contain positive buys and negative sells.  Only its *net* cash
-    flow is counted as new investment or withdrawal, so an internal rebalance
-    does not inflate both totals.  USD trades use the exchange rate captured on
-    that transaction batch.
+    The denominator is cumulative investment rather than net investment.  This
+    keeps withdrawals from making a remaining portfolio's simple return
+    explode or change sign.
     """
 
-    if (
-        isinstance(current_value, bool)
-        or not isinstance(current_value, (int, float))
-        or not math.isfinite(current_value)
-        or current_value < 0
-    ):
-        raise ValueError(f"invalid current value: {current_value}")
+    values = {
+        "invested": invested,
+        "withdrawn": withdrawn,
+        "current value": current_value,
+    }
+    normalized: dict[str, float] = {}
+    for name, value in values.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"invalid {name}: {value}")
+        normalized[name] = float(value)
 
-    invested = 0.0
-    withdrawn = 0.0
-    for transaction in transactions:
-        if not isinstance(transaction, dict):
-            raise ValueError("transaction must be a mapping")
-        trades = transaction.get("trades")
-        if not isinstance(trades, list) or not trades:
-            raise ValueError("transaction must contain trades")
-        rate = transaction.get("usdcny")
-        batch_cash_flow = 0.0
-        for trade in trades:
-            ticker = trade.get("ticker")
-            shares = trade.get("shares")
-            price = trade.get("price")
-            if ticker not in TICKER_WHITELIST:
-                raise ValueError(f"unknown ticker in history: {ticker}")
-            if (
-                isinstance(shares, bool)
-                or not isinstance(shares, (int, float))
-                or not math.isfinite(shares)
-                or shares == 0
-            ):
-                raise ValueError(f"invalid historical shares for {ticker}: {shares}")
-            if (
-                isinstance(price, bool)
-                or not isinstance(price, (int, float))
-                or not math.isfinite(price)
-                or price <= 0
-            ):
-                raise ValueError(f"invalid historical price for {ticker}: {price}")
-            multiplier = 1.0
-            if TICKER_CURRENCY[ticker] == "USD":
-                if (
-                    isinstance(rate, bool)
-                    or not isinstance(rate, (int, float))
-                    or not math.isfinite(rate)
-                    or rate <= 0
-                ):
-                    raise ValueError(f"invalid historical USD/CNY rate: {rate}")
-                multiplier = float(rate)
-            batch_cash_flow += shares * price * multiplier
-
-        if batch_cash_flow > 0:
-            invested += batch_cash_flow
-        elif batch_cash_flow < 0:
-            withdrawn -= batch_cash_flow
-
-    net_invested = invested - withdrawn
-    profit = float(current_value) - net_invested
-    return_rate = profit / invested if invested > 0 else None
-    return HistorySummary(
-        invested=invested,
-        withdrawn=withdrawn,
+    invested_value = normalized["invested"]
+    withdrawn_value = normalized["withdrawn"]
+    current = normalized["current value"]
+    net_invested = invested_value - withdrawn_value
+    profit = current + withdrawn_value - invested_value
+    return PerformanceSummary(
+        invested=invested_value,
+        withdrawn=withdrawn_value,
         net_invested=net_invested,
-        current_value=float(current_value),
+        current_value=current,
         profit=profit,
-        return_rate=return_rate,
+        return_rate=profit / invested_value if invested_value > 0 else None,
     )
 
 
 def trend_signal(
-    prices: Sequence[float],
+    prices: Mapping[date, float],
     short_window: int = TREND_SHORT_WINDOW,
     long_window: int = TREND_LONG_WINDOW,
 ) -> float | None:
@@ -133,22 +100,28 @@ def trend_signal(
 
     if short_window <= 0 or long_window <= short_window:
         raise ValueError("trend windows must satisfy 0 < short < long")
-    if len(prices) < long_window or not _valid_price_series(prices):
+    ordered = _ordered_prices(prices)
+    if ordered is None or len(ordered) < long_window:
         return None
-    short_mean = sum(prices[-short_window:]) / short_window
-    long_mean = sum(prices[-long_window:]) / long_window
+    short_mean = sum(ordered[-short_window:]) / short_window
+    long_mean = sum(ordered[-long_window:]) / long_window
     return short_mean / long_mean - 1.0
 
 
 def trend_direction(
-    prices: Sequence[float],
+    prices: Mapping[date, float],
     threshold: float = 0.01,
     short_window: int = TREND_SHORT_WINDOW,
     long_window: int = TREND_LONG_WINDOW,
 ) -> str | None:
     """Return ``up``, ``down``, ``flat``, or ``None`` for insufficient data."""
 
-    if not math.isfinite(threshold) or threshold < 0:
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not math.isfinite(threshold)
+        or threshold < 0
+    ):
         raise ValueError("trend threshold must be finite and non-negative")
     signal = trend_signal(prices, short_window, long_window)
     if signal is None:
@@ -161,27 +134,24 @@ def trend_direction(
 
 
 def bucket_correlation(
-    prices_a: Sequence[float],
-    prices_b: Sequence[float],
+    prices_a: Mapping[date, float],
+    prices_b: Mapping[date, float],
     min_days: int = CORRELATION_MIN_POINTS,
 ) -> float | None:
-    """Return Pearson correlation of aligned daily returns."""
+    """Return Pearson correlation of returns on exact common dates."""
 
-    if min_days < 2:
+    if isinstance(min_days, bool) or not isinstance(min_days, int) or min_days < 2:
         raise ValueError("min_days must be at least two")
-    if (
-        len(prices_a) < min_days + 1
-        or len(prices_b) < min_days + 1
-        or not _valid_price_series(prices_a)
-        or not _valid_price_series(prices_b)
-    ):
+    if not _valid_price_history(prices_a) or not _valid_price_history(prices_b):
         return None
 
-    count = min(len(prices_a), len(prices_b))
-    a = prices_a[-count:]
-    b = prices_b[-count:]
-    returns_a = [(a[index] / a[index - 1]) - 1.0 for index in range(1, count)]
-    returns_b = [(b[index] / b[index - 1]) - 1.0 for index in range(1, count)]
+    common_dates = sorted(set(prices_a).intersection(prices_b))[-HISTORY_WINDOW_DAYS:]
+    if len(common_dates) < min_days + 1:
+        return None
+    a = [float(prices_a[day]) for day in common_dates]
+    b = [float(prices_b[day]) for day in common_dates]
+    returns_a = [(a[index] / a[index - 1]) - 1.0 for index in range(1, len(a))]
+    returns_b = [(b[index] / b[index - 1]) - 1.0 for index in range(1, len(b))]
     mean_a = sum(returns_a) / len(returns_a)
     mean_b = sum(returns_b) / len(returns_b)
     centered_a = [value - mean_a for value in returns_a]
@@ -196,26 +166,22 @@ def bucket_correlation(
 
 
 def correlation_warnings(
-    history: dict[str, Sequence[float]],
+    history: Mapping[str, Mapping[date, float]],
     threshold: float = CORRELATION_WARNING,
     min_days: int = CORRELATION_MIN_POINTS,
 ) -> tuple[CorrelationWarning, ...]:
     """Return all stable-order bucket pairs above an absolute threshold."""
 
-    if not math.isfinite(threshold) or not 0 <= threshold <= 1:
-        raise ValueError("correlation threshold must be between zero and one")
-    warnings: list[CorrelationWarning] = []
-    for first, second in combinations(BUCKET_ORDER, 2):
-        correlation = bucket_correlation(
-            history.get(first, ()), history.get(second, ()), min_days=min_days
-        )
-        if correlation is not None and abs(correlation) > threshold:
-            warnings.append(CorrelationWarning(first, second, correlation))
-    return tuple(warnings)
+    _validate_correlation_threshold(threshold)
+    return tuple(
+        CorrelationWarning(first, second, correlation)
+        for first, second, correlation in _available_correlations(history, min_days)
+        if abs(correlation) > threshold
+    )
 
 
 def diagnostics(
-    history: dict[str, Sequence[float]],
+    history: Mapping[str, Mapping[date, float]],
     trend_threshold: float = 0.01,
     correlation_threshold: float = CORRELATION_WARNING,
     correlation_min_days: int = CORRELATION_MIN_POINTS,
@@ -223,24 +189,60 @@ def diagnostics(
     """Build trend directions and correlation warnings without affecting plans."""
 
     trends = {
-        bucket: trend_direction(history.get(bucket, ()), threshold=trend_threshold)
+        bucket: trend_direction(history.get(bucket, {}), threshold=trend_threshold)
         for bucket in BUCKET_ORDER
     }
+    _validate_correlation_threshold(correlation_threshold)
+    available = _available_correlations(history, correlation_min_days)
     return Diagnostics(
         trends=trends,
-        correlations=correlation_warnings(
-            history,
-            threshold=correlation_threshold,
-            min_days=correlation_min_days,
+        correlations=tuple(
+            CorrelationWarning(first, second, correlation)
+            for first, second, correlation in available
+            if abs(correlation) > correlation_threshold
         ),
+        correlation_pairs=len(available),
     )
 
 
-def _valid_price_series(prices: Sequence[float]) -> bool:
+def _available_correlations(
+    history: Mapping[str, Mapping[date, float]],
+    min_days: int,
+) -> tuple[tuple[str, str, float], ...]:
+    available: list[tuple[str, str, float]] = []
+    for first, second in combinations(BUCKET_ORDER, 2):
+        correlation = bucket_correlation(
+            history.get(first, {}), history.get(second, {}), min_days=min_days
+        )
+        if correlation is not None:
+            available.append((first, second, correlation))
+    return tuple(available)
+
+
+def _validate_correlation_threshold(threshold: float) -> None:
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, (int, float))
+        or not math.isfinite(threshold)
+        or not 0 <= threshold <= 1
+    ):
+        raise ValueError("correlation threshold must be between zero and one")
+
+
+def _ordered_prices(prices: Mapping[date, float]) -> list[float] | None:
+    if not _valid_price_history(prices):
+        return None
+    return [float(prices[day]) for day in sorted(prices)]
+
+
+def _valid_price_history(prices: object) -> bool:
+    if not isinstance(prices, Mapping):
+        return False
     return all(
-        not isinstance(price, bool)
+        type(day) is date
+        and not isinstance(price, bool)
         and isinstance(price, (int, float))
         and math.isfinite(price)
         and price > 0
-        for price in prices
+        for day, price in prices.items()
     )

@@ -2,6 +2,7 @@
 
 import json
 import math
+from datetime import date
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,17 +16,17 @@ def _prices(value: float = 100.0) -> dict[str, float]:
 
 
 class _Series:
-    def __init__(self, values):
-        self._values = values
+    def __init__(self, points):
+        self._points = points
 
-    def tolist(self):
-        return list(self._values)
+    def items(self):
+        return iter(self._points)
 
 
 class _Frame:
-    def __init__(self, values_by_symbol):
+    def __init__(self, points_by_symbol):
         self._close = {
-            symbol: _Series(values) for symbol, values in values_by_symbol.items()
+            symbol: _Series(points) for symbol, points in points_by_symbol.items()
         }
 
     def __getitem__(self, field):
@@ -35,10 +36,20 @@ class _Frame:
 
 
 def _frame(**overrides) -> _Frame:
-    values = {ticker: [90.0, math.nan, 100.0] for ticker in TICKER_ORDER}
-    values["CNY=X"] = [7.1, 7.2]
-    values.update(overrides)
-    return _Frame(values)
+    points = {
+        ticker: [
+            (date(2026, 4, 3), 100.0),
+            (date(2026, 4, 1), 90.0),
+            (date(2026, 4, 2), math.nan),
+        ]
+        for ticker in TICKER_ORDER
+    }
+    points["CNY=X"] = [
+        (date(2026, 4, 2), 7.1),
+        (date(2026, 4, 3), 7.2),
+    ]
+    points.update(overrides)
+    return _Frame(points)
 
 
 class TestValidateMarket:
@@ -87,8 +98,16 @@ class TestPriceFile:
                     "prices": _prices(),
                     "usdcny": 7.25,
                     "history": {
-                        "SPYM": [98.0, 99.0, 100.0],
-                        "VGIT": [80.0, 81.0],
+                        "SPYM": {
+                            "2026-04-03": 100.0,
+                            "2026-04-01": 98.0,
+                            "2026-04-02": 99.0,
+                        },
+                        "VGIT": {"2026-04-01": 80.0, "2026-04-02": 81.0},
+                    },
+                    "usdcny_history": {
+                        "2026-04-02": 7.2,
+                        "2026-04-01": 7.1,
                     },
                 }
             ),
@@ -97,12 +116,20 @@ class TestPriceFile:
         monkeypatch.setenv("PP_PRICE_FILE", str(path))
         download = MagicMock()
 
-        snapshot = fetch_market(download_fn=download)
+        snapshot = fetch_market(download_fn=download, with_history=True)
 
         download.assert_not_called()
         assert snapshot.prices == _prices()
         assert snapshot.usdcny == 7.25
-        assert snapshot.history["SPYM"] == (98.0, 99.0, 100.0)
+        assert snapshot.history["SPYM"] == {
+            date(2026, 4, 1): 98.0,
+            date(2026, 4, 2): 99.0,
+            date(2026, 4, 3): 100.0,
+        }
+        assert snapshot.usdcny_history == {
+            date(2026, 4, 1): 7.1,
+            date(2026, 4, 2): 7.2,
+        }
 
     def test_missing_history_is_an_empty_mapping(self, tmp_path, monkeypatch):
         path = tmp_path / "market.json"
@@ -112,7 +139,30 @@ class TestPriceFile:
         )
         monkeypatch.setenv("PP_PRICE_FILE", str(path))
 
-        assert fetch_market().history == {}
+        snapshot = fetch_market(with_history=True)
+
+        assert snapshot.history == {}
+        assert snapshot.usdcny_history == {}
+
+    def test_default_fetch_ignores_optional_history(self, tmp_path, monkeypatch):
+        path = tmp_path / "market.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "prices": _prices(),
+                    "usdcny": 7.25,
+                    "history": {"SPYM": {"2026-04-01": 98.0}},
+                    "usdcny_history": {"2026-04-01": 7.1},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PP_PRICE_FILE", str(path))
+
+        snapshot = fetch_market()
+
+        assert snapshot.history == {}
+        assert snapshot.usdcny_history == {}
 
     def test_invalid_history_is_ignored_without_weakening_current_data(
         self, tmp_path, monkeypatch
@@ -123,17 +173,42 @@ class TestPriceFile:
                 {
                     "prices": _prices(),
                     "usdcny": 7.25,
-                    "history": {"SPYM": [100.0, 0.0], "VGIT": "invalid"},
+                    "history": {
+                        "SPYM": {"2026-04-01": 100.0},
+                        "VGIT": {"2026-04-01": 0.0},
+                    },
+                    "usdcny_history": {"not-a-date": 7.1},
                 }
             ),
             encoding="utf-8",
         )
         monkeypatch.setenv("PP_PRICE_FILE", str(path))
 
-        snapshot = fetch_market()
+        snapshot = fetch_market(with_history=True)
 
         assert snapshot.prices["SPYM"] == 100.0
+        assert snapshot.history == {"SPYM": {date(2026, 4, 1): 100.0}}
+        assert snapshot.usdcny_history == {}
+
+    def test_undated_array_history_is_not_supported(self, tmp_path, monkeypatch):
+        path = tmp_path / "market.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "prices": _prices(),
+                    "usdcny": 7.25,
+                    "history": {"SPYM": [98.0, 99.0, 100.0]},
+                    "usdcny_history": [7.1, 7.2],
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PP_PRICE_FILE", str(path))
+
+        snapshot = fetch_market(with_history=True)
+
         assert snapshot.history == {}
+        assert snapshot.usdcny_history == {}
 
     @pytest.mark.parametrize(
         "payload,error",
@@ -159,7 +234,7 @@ class TestPriceFile:
 
 
 class TestYFinanceMarket:
-    def test_downloads_three_months_and_returns_last_valid_current_values(
+    def test_default_download_uses_short_period_and_returns_no_history(
         self, monkeypatch
     ):
         monkeypatch.delenv("PP_PRICE_FILE", raising=False)
@@ -169,11 +244,31 @@ class TestYFinanceMarket:
 
         symbols = download.call_args.args[0]
         assert symbols == [*TICKER_ORDER, "CNY=X"]
-        assert download.call_args.kwargs["period"] == "3mo"
+        assert download.call_args.kwargs["period"] == "5d"
         assert download.call_args.kwargs["interval"] == "1d"
         assert snapshot.prices == _prices()
         assert snapshot.usdcny == 7.2
-        assert snapshot.history["SPYM"] == (90.0, 100.0)
+        assert snapshot.history == {}
+        assert snapshot.usdcny_history == {}
+
+    def test_history_download_preserves_dates_and_sorts_points(self, monkeypatch):
+        monkeypatch.delenv("PP_PRICE_FILE", raising=False)
+        download = MagicMock(return_value=_frame())
+
+        snapshot = fetch_market(download_fn=download, with_history=True)
+
+        assert download.call_args.kwargs["period"] == "60d"
+        assert snapshot.prices == _prices()
+        assert snapshot.usdcny == 7.2
+        assert snapshot.history["SPYM"] == {
+            date(2026, 4, 1): 90.0,
+            date(2026, 4, 3): 100.0,
+        }
+        assert set(snapshot.history) == set(TICKER_ORDER)
+        assert snapshot.usdcny_history == {
+            date(2026, 4, 2): 7.1,
+            date(2026, 4, 3): 7.2,
+        }
 
     def test_missing_ticker_is_fatal(self, monkeypatch):
         monkeypatch.delenv("PP_PRICE_FILE", raising=False)
@@ -195,7 +290,29 @@ class TestYFinanceMarket:
         monkeypatch.delenv("PP_PRICE_FILE", raising=False)
         with pytest.raises(MarketDataError, match="price for SPYM"):
             fetch_market(
-                download_fn=MagicMock(return_value=_frame(SPYM=[90.0, -1.0]))
+                download_fn=MagicMock(
+                    return_value=_frame(
+                        SPYM=[
+                            (date(2026, 4, 1), 90.0),
+                            (date(2026, 4, 3), -1.0),
+                        ]
+                    )
+                )
+            )
+
+    def test_download_with_an_undated_point_is_fatal(self, monkeypatch):
+        monkeypatch.delenv("PP_PRICE_FILE", raising=False)
+
+        with pytest.raises(MarketDataError, match="invalid date for SPYM"):
+            fetch_market(
+                download_fn=MagicMock(
+                    return_value=_frame(
+                        SPYM=[
+                            (0, 90.0),
+                            (date(2026, 4, 3), 100.0),
+                        ]
+                    )
+                )
             )
 
     def test_download_failure_is_explicit(self, monkeypatch):
