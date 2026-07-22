@@ -1,457 +1,492 @@
-"""Rebalancing engine (§4.6–§4.7, §4.11).
+"""Pure, unified portfolio planner.
 
-Pure calculation layer — no IO, no print, no side effects.
+The planner chooses one legal final holding vector and derives signed trades
+from it.  DCA, cross-bucket rebalancing, intra-bucket rebalancing, currency
+balancing, and the GLDM/SGOV CNY conversions therefore cannot produce
+contradictory buy and sell instructions for the same ticker.
 """
 
+from __future__ import annotations
+
 import math
+from dataclasses import dataclass
+from itertools import product
 
 from ppt.constants import (
-    A_SHARE_TICKERS,
+    BUCKET_ORDER,
     BUCKET_TICKERS,
-    BUCKETS,
     CNY_TICKERS,
-    EPSILON,
-    MIN_TRADE_AMOUNT,
-    OVERSPOOT_PROTECTION_FLOOR,
+    CORRIDOR_LOWER,
+    CORRIDOR_UPPER,
+    INTRA_BUCKET_SELL_THRESHOLD,
+    TARGET_BUCKET_WEIGHT,
     TICKER_LOT_SIZE,
+    TICKER_ORDER,
+    TICKER_WHITELIST,
 )
-from ppt.valuation import bucket_values, bucket_weights, ticker_values_cny, total_value
+from ppt.valuation import (
+    BalanceScore,
+    balance_score,
+    bucket_values,
+    bucket_weights,
+    ticker_values_cny,
+    total_value,
+)
 
-# ── §4.6 强制再平衡：联立方程求解 ────────────────────────────────────────────
-
-
-def single_over_rebalance(
-    V_b: float,
-    w_star: float,
-    V: float,
-    price: float,
-    max_shares: float | None = None,
-) -> float:
-    """Single overweight bucket analytic solution.
-
-    s = (V_b - w*_b * V) / (p * (1 - w*_b))
-
-    Shares rounded UP (ceil), clamped to max_shares (holdings).
-    Returns 0 if bucket is not over or price=0.
-    """
-    if price < EPSILON:
-        return 0.0
-    excess = V_b - w_star * V
-    if excess <= EPSILON * V:
-        return 0.0
-    denom = price * (1.0 - w_star)
-    if abs(denom) < EPSILON:
-        return 0.0
-    s = math.ceil(excess / denom - EPSILON)
-    s = max(s, 0.0)
-    if max_shares is not None:
-        s = min(s, max_shares)
-    return float(s)
+_VALUE_EPSILON = 1e-7
+_SCORE_DIGITS = 12
+_TICKERS = TICKER_ORDER
 
 
-def multi_over_rebalance(
-    over: dict[str, dict[str, float]],
-    V: float,
-) -> dict[str, float]:
-    """Multi-bucket simultaneous over-rebalance (simultaneous equations).
+@dataclass(frozen=True)
+class PlanResult:
+    """Complete result of a side-effect-free planning run."""
 
-    over: {bucket: {V_b, w_star, price}}
-
-    S = (sum V_i - V * sum w*_i) / (1 - sum w*_i)
-
-    Special: if sum(w*_i) ≈ 1 (all buckets over, degenerate),
-    each bucket solved independently.
-    """
-    if not over:
-        return {}
-
-    sum_w = sum(v["w_star"] for v in over.values())
-    sum_V = sum(v["V_b"] for v in over.values())
-
-    # Degenerate: all buckets over
-    if abs(1.0 - sum_w) < EPSILON:
-        result: dict[str, float] = {}
-        for b, data in over.items():
-            s = single_over_rebalance(
-                data["V_b"],
-                data["w_star"],
-                V,
-                data["price"],
-                data.get("max_shares"),
-            )
-            if s > 0:
-                result[b] = s
-        return result
-
-    S = (sum_V - V * sum_w) / (1.0 - sum_w)
-    if S <= 0:
-        return {}
-
-    result = {}
-    for b, data in over.items():
-        sell_amount = data["V_b"] - data["w_star"] * (V - S)
-        if sell_amount > EPSILON:
-            s = math.ceil(sell_amount / data["price"] - EPSILON)
-            if data.get("max_shares") is not None:
-                s = min(s, data["max_shares"])
-            if s > 0:
-                result[b] = float(s)
-    return result
+    trades: dict[str, int]
+    before_score: BalanceScore
+    after_score: BalanceScore
+    buy_cost: float
+    sell_proceeds: float
+    unused_amount: float
+    final_holdings: dict[str, int]
+    corridor_breached: bool
 
 
-def multi_under_rebalance(
-    under: dict[str, dict[str, float]],
-    V: float,
-) -> dict[str, float]:
-    """Multi-bucket simultaneous under-rebalance.
-
-    under: {bucket: {V_b, w_star, price}}
-
-    B = (V * sum w*_i - sum V_i) / (1 - sum w*_i)
-    """
-    if not under:
-        return {}
-
-    sum_w = sum(v["w_star"] for v in under.values())
-    sum_V = sum(v["V_b"] for v in under.values())
-
-    if abs(1.0 - sum_w) < EPSILON:
-        return {}
-
-    B = (V * sum_w - sum_V) / (1.0 - sum_w)
-    if B <= 0:
-        return {}
-
-    result = {}
-    for b, data in under.items():
-        buy_amount = data["w_star"] * (V + B) - data["V_b"]
-        if buy_amount > EPSILON:
-            s = math.floor(buy_amount / data["price"] + EPSILON)
-            if s > 0:
-                result[b] = float(s)
-    return result
+@dataclass(frozen=True)
+class _PlanningContext:
+    current: dict[str, int]
+    prices: dict[str, float]
+    prices_cny: dict[str, float]
+    usdcny: float
+    budget: float
+    cross_sell_buckets: frozenset[str]
+    intra_sell_tickers: frozenset[str]
 
 
-# ── §4.7 增量分配（定投）────────────────────────────────────────────────────
-
-
-def dca_allocate(
-    C: float,
-    state: dict,
-    tolerance: float = 0.005,
-    elasticity: float = 1.5,
-    min_trade: float = MIN_TRADE_AMOUNT,
-) -> dict[str, float]:
-    """Incremental DCA allocation.
-
-    1. Gap identification: only buckets with gap > tolerance * (V+C)
-    2. Elastic weighting: weight_b = gap_b^elasticity
-    3. Fee filtering: iteratively remove allocations < min_trade
-    4. Discretization: Hamilton method (max remainder)
-    5. In-bucket ticker selection: pick lower market-cap ticker
-
-    Returns: {ticker: shares} (already discretized to lot sizes)
-    """
-    holdings: dict[str, float] = state["holdings"]
-    prices: dict[str, float] = state["prices"]
-    usdcny: float = state["usdcny"]
-    target_weights: dict[str, float] = state["target_weights"]
-
-    tv = ticker_values_cny(holdings, prices, usdcny)
-    bv = bucket_values(tv)
-    V = total_value(bv)
-    V_new = V + C
-
-    # Step 1: Gap identification
-    gaps: dict[str, float] = {}
-    for b in BUCKETS:
-        target_val = V_new * target_weights[b]
-        gap = target_val - bv[b]
-        threshold = V_new * tolerance
-        if gap > threshold:
-            gaps[b] = gap
-
-    # Degenerate: total=0 (first investment) → equal split
-    if V < EPSILON and not gaps:
-        return _equal_split_first_buy(C, prices, usdcny)
-
-    # Degenerate: all within tolerance → proportional to relative gap
-    if not gaps:
-        for b in BUCKETS:
-            target_val = V_new * target_weights[b]
-            gap = target_val - bv[b]
-            if gap > EPSILON:
-                gaps[b] = gap
-
-    # Step 2: Elastic weighting
-    weights = {b: g**elasticity for b, g in gaps.items()}
-    total_w = sum(weights.values())
-    if total_w < EPSILON:
-        return {}
-
-    alloc = {b: C * weights[b] / total_w for b in weights}
-
-    # Step 3: Fee filtering — iteratively remove below min_trade
-    alloc = _min_trade_filter(alloc, gaps, prices, usdcny, min_trade)
-
-    # Step 4: Discretization with Hamilton method
-    result = _discretize_hamilton(alloc, prices, usdcny, holdings)
-
-    return result
-
-
-def _equal_split_first_buy(
-    C: float,
+def build_plan(
+    holdings: dict[str, int | float],
     prices: dict[str, float],
     usdcny: float,
-) -> dict[str, float]:
-    """First investment: equal 25% split across 4 buckets."""
-    per_bucket = C / 4.0
-    result: dict[str, float] = {}
-    for bucket, tickers in BUCKET_TICKERS.items():
-        # Pick primary ticker for single-ticker buckets
-        ticker = tickers[0]
-        price_cny = prices.get(ticker, 0.0) * (usdcny if ticker not in CNY_TICKERS else 1.0)
-        if price_cny < EPSILON:
+    budget: float,
+) -> PlanResult:
+    """Return the lexicographically best legal plan found for ``budget``.
+
+    The search starts from the continuous water-filling solution, enumerates a
+    finite legal-lot neighbourhood around it, then performs deterministic
+    one-lot and paired-swap improvement.  Every candidate is compared by the
+    full ``bucket -> intra-bucket -> currency`` score, followed only by unused
+    money and turnover tie-breakers.
+
+    The 15%-35% corridor is a permission gate for *net* cross-bucket sales.
+    Inside it, a bucket may receive new money or perform an eligible internal
+    switch, but may not fund another bucket.  Once any bucket breaches the
+    corridor, buckets initially above 25% may fund the rest of the portfolio.
+    """
+
+    current, clean_prices, clean_rate, clean_budget = _validate_inputs(
+        holdings, prices, usdcny, budget
+    )
+    prices_cny = {
+        ticker: clean_prices[ticker] * (1.0 if ticker in CNY_TICKERS else clean_rate)
+        for ticker in _TICKERS
+    }
+    before_ticker_values = ticker_values_cny(current, clean_prices, clean_rate)
+    before_values = bucket_values(before_ticker_values)
+    before_weights = bucket_weights(before_values)
+    portfolio_value = total_value(before_values)
+    corridor_breached = portfolio_value > 0 and any(
+        before_weights[bucket] < CORRIDOR_LOWER
+        or before_weights[bucket] > CORRIDOR_UPPER
+        for bucket in BUCKET_ORDER
+    )
+    cross_sell_buckets = frozenset(
+        bucket
+        for bucket in BUCKET_ORDER
+        if corridor_breached and before_weights[bucket] > TARGET_BUCKET_WEIGHT
+    )
+    intra_sell_tickers = _intra_sell_sources(current, before_ticker_values, before_values)
+    ctx = _PlanningContext(
+        current=current,
+        prices=clean_prices,
+        prices_cny=prices_cny,
+        usdcny=clean_rate,
+        budget=clean_budget,
+        cross_sell_buckets=cross_sell_buckets,
+        intra_sell_tickers=intra_sell_tickers,
+    )
+
+    desired_bucket_values = _desired_bucket_values(before_values, clean_budget, corridor_breached)
+    per_bucket_candidates = [
+        _bucket_candidates(bucket, desired_bucket_values[bucket], ctx)
+        for bucket in BUCKET_ORDER
+    ]
+
+    best = dict(current)
+    best_key = _candidate_key(best, ctx)
+    for bucket_vectors in product(*per_bucket_candidates):
+        candidate = {
+            ticker: shares
+            for vector in bucket_vectors
+            for ticker, shares in vector.items()
+        }
+        if not _is_feasible(candidate, ctx):
             continue
-        lot = TICKER_LOT_SIZE[ticker]
-        shares = math.floor(per_bucket / price_cny / lot) * lot
-        if shares > 0:
-            result[ticker] = float(shares)
-    return result
+        candidate_key = _candidate_key(candidate, ctx)
+        if candidate_key < best_key:
+            best = candidate
+            best_key = candidate_key
+
+    best = _improve_by_legal_lots(best, best_key, ctx)
+    trades = {
+        ticker: best[ticker] - current[ticker]
+        for ticker in _TICKERS
+        if best[ticker] != current[ticker]
+    }
+    buy_cost, sell_proceeds = _cash_totals(best, ctx)
+    unused = clean_budget + sell_proceeds - buy_cost
+    if abs(unused) < _VALUE_EPSILON:
+        unused = 0.0
+
+    return PlanResult(
+        trades=trades,
+        before_score=balance_score(current, clean_prices, clean_rate),
+        after_score=balance_score(best, clean_prices, clean_rate),
+        buy_cost=buy_cost,
+        sell_proceeds=sell_proceeds,
+        unused_amount=unused,
+        final_holdings=best,
+        corridor_breached=corridor_breached,
+    )
 
 
-def _min_trade_filter(
-    alloc: dict[str, float],
-    gaps: dict[str, float],
+def _validate_inputs(
+    holdings: dict[str, int | float],
     prices: dict[str, float],
     usdcny: float,
-    min_trade: float,
-) -> dict[str, float]:
-    """Iteratively remove bucket allocations below min_trade."""
-    if not alloc:
-        return alloc
+    budget: float,
+) -> tuple[dict[str, int], dict[str, float], float, float]:
+    if not isinstance(holdings, dict):
+        raise ValueError("holdings must be a mapping")
+    unknown = set(holdings) - TICKER_WHITELIST
+    if unknown:
+        raise ValueError(f"unknown holdings tickers: {', '.join(sorted(unknown))}")
 
-    while len(alloc) >= 1:
-        # Find bucket with smallest allocation amount
-        min_bucket = None
-        min_amount = float("inf")
-        min_price_cny = 0.0
-        for b, amount in alloc.items():
-            ticker = BUCKET_TICKERS[b][0]
-            price_cny = prices.get(ticker, 0.0) * (usdcny if ticker not in CNY_TICKERS else 1.0)
-            if amount < min_amount - EPSILON:
-                min_amount = amount
-                min_bucket = b
-                min_price_cny = price_cny
-            elif abs(amount - min_amount) < EPSILON and price_cny > min_price_cny:
-                min_bucket = b
-                min_price_cny = price_cny
+    current: dict[str, int] = {}
+    for ticker in _TICKERS:
+        shares = holdings.get(ticker, 0)
+        if (
+            isinstance(shares, bool)
+            or not isinstance(shares, (int, float))
+            or not math.isfinite(shares)
+            or shares < 0
+            or shares != int(shares)
+            or int(shares) % TICKER_LOT_SIZE[ticker] != 0
+        ):
+            raise ValueError(f"invalid holdings for {ticker}: {shares}")
+        current[ticker] = int(shares)
 
-        if min_bucket is None or min_amount >= min_trade - EPSILON:
-            break
+    if not isinstance(prices, dict):
+        raise ValueError("prices must be a mapping")
+    missing = TICKER_WHITELIST - set(prices)
+    if missing:
+        raise ValueError(f"missing prices: {', '.join(sorted(missing))}")
+    clean_prices: dict[str, float] = {}
+    for ticker in _TICKERS:
+        price = prices[ticker]
+        if (
+            isinstance(price, bool)
+            or not isinstance(price, (int, float))
+            or not math.isfinite(price)
+            or price <= 0
+        ):
+            raise ValueError(f"invalid price for {ticker}: {price}")
+        clean_prices[ticker] = float(price)
 
-        if len(alloc) == 1:
-            # Last bucket below min_trade → drop it
-            return {}
+    if (
+        isinstance(usdcny, bool)
+        or not isinstance(usdcny, (int, float))
+        or not math.isfinite(usdcny)
+        or usdcny <= 0
+    ):
+        raise ValueError(f"invalid USD/CNY rate: {usdcny}")
+    if (
+        isinstance(budget, bool)
+        or not isinstance(budget, (int, float))
+        or not math.isfinite(budget)
+        or budget <= 0
+    ):
+        raise ValueError(f"invalid budget: {budget}")
 
-        # Remove and redistribute
-        removed = alloc.pop(min_bucket)
-        total_remaining = sum(alloc.values())
-        if total_remaining > EPSILON:
-            for b in alloc:
-                alloc[b] += removed * alloc[b] / total_remaining
-
-    return alloc
+    return current, clean_prices, float(usdcny), float(budget)
 
 
-def _discretize_hamilton(
-    alloc: dict[str, float],
-    prices: dict[str, float],
-    usdcny: float,
-    holdings: dict[str, float] = None,
-) -> dict[str, float]:
-    """Discretize allocation to lot-size units using Hamilton (max remainder) method."""
-    # Map bucket allocations to ticker shares
-    ticker_alloc: dict[str, float] = {}
-    for bucket, amount in alloc.items():
+def _intra_sell_sources(
+    holdings: dict[str, int],
+    ticker_vals: dict[str, float],
+    bucket_vals: dict[str, float],
+) -> frozenset[str]:
+    """Return initially dominant tickers allowed to fund an internal switch."""
+
+    allowed_sources = {
+        "stock": frozenset(BUCKET_TICKERS["stock"]),
+        "gold": frozenset({"GLDM"}),
+        "cash": frozenset({"SGOV"}),
+    }
+    sources: set[str] = set()
+    for bucket in BUCKET_ORDER:
         tickers = BUCKET_TICKERS[bucket]
-        if len(tickers) == 1:
-            ticker = tickers[0]
-        else:
-            # Pick non-A-share ticker; when multiple, buy the lower-value one
-            non_a = [t for t in tickers if t not in A_SHARE_TICKERS]
-            if len(non_a) == 1:
-                ticker = non_a[0]
-            elif non_a:
-                # Multiple non-A choices (e.g. stock bucket: SPYM, AVUV)
-                if holdings:
-                    t1, t2 = non_a[0], non_a[1]
-                    v1 = (
-                        holdings.get(t1, 0)
-                        * prices.get(t1, 0)
-                        * (usdcny if t1 not in CNY_TICKERS else 1)
-                    )
-                    v2 = (
-                        holdings.get(t2, 0)
-                        * prices.get(t2, 0)
-                        * (usdcny if t2 not in CNY_TICKERS else 1)
-                    )
-                    ticker = t1 if v1 <= v2 else t2
-                else:
-                    ticker = non_a[0]
-            elif holdings:
-                t1, t2 = tickers[0], tickers[1]
-                v1 = (
-                    holdings.get(t1, 0)
-                    * prices.get(t1, 0)
-                    * (usdcny if t1 not in CNY_TICKERS else 1)
-                )
-                v2 = (
-                    holdings.get(t2, 0)
-                    * prices.get(t2, 0)
-                    * (usdcny if t2 not in CNY_TICKERS else 1)
-                )
-                ticker = t1 if v1 <= v2 else t2
-            else:
-                ticker = tickers[0]
-        price_cny = prices.get(ticker, 0.0) * (usdcny if ticker not in CNY_TICKERS else 1.0)
-        if price_cny < EPSILON:
+        total = bucket_vals[bucket]
+        if len(tickers) < 2 or total <= 0:
             continue
-        ticker_alloc[ticker] = amount / price_cny
+        dominant = max(tickers, key=lambda ticker: ticker_vals[ticker])
+        if (
+            holdings[dominant] > 0
+            and dominant in allowed_sources.get(bucket, frozenset())
+            and ticker_vals[dominant] / total > INTRA_BUCKET_SELL_THRESHOLD
+        ):
+            sources.add(dominant)
+    return frozenset(sources)
 
-    # Floor to lot sizes
-    result: dict[str, float] = {}
-    remainders: list[tuple[str, float]] = []
-    total_floor_value = 0.0
 
-    for ticker, exact_shares in ticker_alloc.items():
+def _desired_bucket_values(
+    current_values: dict[str, float],
+    budget: float,
+    corridor_breached: bool,
+) -> dict[str, float]:
+    """Continuous priority-one solution before legal-lot discretization."""
+
+    current_total = total_value(current_values)
+    if corridor_breached:
+        target = (current_total + budget) / len(BUCKET_ORDER)
+        return {bucket: target for bucket in BUCKET_ORDER}
+
+    low = min(current_values.values(), default=0.0)
+    high = max(current_values.values(), default=0.0) + budget
+    for _ in range(80):
+        level = (low + high) / 2.0
+        required = sum(max(level - current_values[bucket], 0.0) for bucket in BUCKET_ORDER)
+        if required <= budget:
+            low = level
+        else:
+            high = level
+    return {bucket: max(current_values[bucket], low) for bucket in BUCKET_ORDER}
+
+
+def _nearby_share_counts(target_value: float, unit_value: float, lot: int) -> set[int]:
+    exact_lots = max(target_value, 0.0) / unit_value
+    base = math.floor(exact_lots)
+    return {max(base + offset, 0) * lot for offset in range(-2, 4)}
+
+
+def _bucket_candidates(
+    bucket: str,
+    desired_value: float,
+    ctx: _PlanningContext,
+) -> tuple[dict[str, int], ...]:
+    """Build a small, diverse legal-lot neighbourhood for one bucket."""
+
+    tickers = BUCKET_TICKERS[bucket]
+    share_options: dict[str, set[int]] = {}
+    for ticker in tickers:
         lot = TICKER_LOT_SIZE[ticker]
-        price_cny = prices.get(ticker, 0.0) * (usdcny if ticker not in CNY_TICKERS else 1.0)
-        floored = math.floor(exact_shares / lot) * lot
-        result[ticker] = float(floored)
-        total_floor_value += floored * price_cny
-        remainder = (exact_shares - floored) * price_cny
-        remainders.append((ticker, remainder))
+        unit_value = lot * ctx.prices_cny[ticker]
+        targets = [desired_value / len(tickers), desired_value]
+        for other in tickers:
+            if other != ticker:
+                targets.append(
+                    desired_value - ctx.current[other] * ctx.prices_cny[other]
+                )
+        options = {ctx.current[ticker]}
+        for target in targets:
+            options.update(_nearby_share_counts(target, unit_value, lot))
+        share_options[ticker] = options
 
-    # Distribute remaining funds via max remainder
-    remaining = sum(alloc.values()) - total_floor_value
-    if remaining > 0:
-        remainders.sort(key=lambda x: x[1], reverse=True)
-        for ticker, _ in remainders:
-            lot = TICKER_LOT_SIZE[ticker]
-            price_cny = prices.get(ticker, 0.0) * (usdcny if ticker not in CNY_TICKERS else 1.0)
-            if price_cny < EPSILON:
-                continue
-            one_lot_value = lot * price_cny
-            if remaining >= one_lot_value - EPSILON:
-                result[ticker] += float(lot)
-                remaining -= one_lot_value
-            else:
-                break
+    raw: list[dict[str, int]] = []
+    for counts in product(*(sorted(share_options[ticker]) for ticker in tickers)):
+        vector = dict(zip(tickers, counts))
+        if _bucket_vector_allowed(bucket, vector, ctx):
+            raw.append(vector)
 
-    # Remove zero-share entries
-    return {t: s for t, s in result.items() if s > 0}
+    current_vector = {ticker: ctx.current[ticker] for ticker in tickers}
+    if current_vector not in raw:
+        raw.append(current_vector)
+
+    def local_components(vector: dict[str, int]) -> tuple[float, float, float, float]:
+        values = {
+            ticker: vector[ticker] * ctx.prices_cny[ticker] for ticker in tickers
+        }
+        bucket_value = sum(values.values())
+        equal_value = bucket_value / len(tickers)
+        intra = sum(abs(value - equal_value) for value in values.values())
+        cny_value = sum(values[ticker] for ticker in tickers if ticker in CNY_TICKERS)
+        turnover = sum(
+            abs(vector[ticker] - ctx.current[ticker]) * ctx.prices_cny[ticker]
+            for ticker in tickers
+        )
+        return (
+            abs(bucket_value - desired_value),
+            intra,
+            abs(cny_value - bucket_value / 2),
+            turnover,
+        )
+
+    selected: list[dict[str, int]] = []
+
+    def add(vectors: list[dict[str, int]]) -> None:
+        for vector in vectors:
+            if vector not in selected:
+                selected.append(vector)
+
+    add(sorted(raw, key=local_components)[:10])
+    add(
+        sorted(
+            raw,
+            key=lambda vector: (
+                local_components(vector)[0],
+                local_components(vector)[1],
+                sum(
+                    vector[ticker] * ctx.prices_cny[ticker]
+                    for ticker in tickers
+                    if ticker in CNY_TICKERS
+                ),
+            ),
+        )[:3]
+    )
+    add(
+        sorted(
+            raw,
+            key=lambda vector: (
+                local_components(vector)[0],
+                local_components(vector)[1],
+                -sum(
+                    vector[ticker] * ctx.prices_cny[ticker]
+                    for ticker in tickers
+                    if ticker in CNY_TICKERS
+                ),
+            ),
+        )[:3]
+    )
+    add([current_vector])
+    return tuple(selected)
 
 
-# ── §4.11 定投达标方案 ───────────────────────────────────────────────────────
+def _bucket_vector_allowed(
+    bucket: str,
+    vector: dict[str, int],
+    ctx: _PlanningContext,
+) -> bool:
+    tickers = BUCKET_TICKERS[bucket]
+    delta_value = sum(
+        (vector[ticker] - ctx.current[ticker]) * ctx.prices_cny[ticker]
+        for ticker in tickers
+    )
+    if delta_value < -_VALUE_EPSILON and bucket not in ctx.cross_sell_buckets:
+        return False
+
+    for ticker in tickers:
+        if vector[ticker] < 0 or vector[ticker] % TICKER_LOT_SIZE[ticker] != 0:
+            return False
+        if vector[ticker] >= ctx.current[ticker]:
+            continue
+        if bucket in ctx.cross_sell_buckets:
+            continue
+        if ticker not in ctx.intra_sell_tickers:
+            return False
+    return True
 
 
-def dca_minimum_plan(
-    state: dict,
-    tolerance: float = 0.005,
-) -> tuple[float, dict[str, float]]:
-    """Minimum investment to bring all buckets within tolerance.
+def _cash_totals(
+    final: dict[str, int],
+    ctx: _PlanningContext,
+) -> tuple[float, float]:
+    buy_cost = 0.0
+    sell_proceeds = 0.0
+    for ticker in _TICKERS:
+        delta = final[ticker] - ctx.current[ticker]
+        amount = abs(delta) * ctx.prices_cny[ticker]
+        if delta > 0:
+            buy_cost += amount
+        elif delta < 0:
+            sell_proceeds += amount
+    return buy_cost, sell_proceeds
 
-    1. Gate: max_dev < tolerance → return (0, {})
-    2. Theoretical minimum (underweight buckets only)
-    3. Feasibility: ensure at least 1 lot per bucket
-    4. Round up to nearest 100 CNY
-    5. Over-shoot protection: verify max_dev after allocation < before
 
-    Returns: (C_min, plan) where plan = {ticker: shares}
+def _is_feasible(final: dict[str, int], ctx: _PlanningContext) -> bool:
+    if set(final) != set(_TICKERS):
+        return False
+    for ticker in _TICKERS:
+        shares = final[ticker]
+        if shares < 0 or shares % TICKER_LOT_SIZE[ticker] != 0:
+            return False
+    for bucket in BUCKET_ORDER:
+        vector = {ticker: final[ticker] for ticker in BUCKET_TICKERS[bucket]}
+        if not _bucket_vector_allowed(bucket, vector, ctx):
+            return False
+    buy_cost, sell_proceeds = _cash_totals(final, ctx)
+    return buy_cost <= ctx.budget + sell_proceeds + _VALUE_EPSILON
+
+
+def _candidate_key(final: dict[str, int], ctx: _PlanningContext) -> tuple:
+    score = balance_score(final, ctx.prices, ctx.usdcny)
+    buy_cost, sell_proceeds = _cash_totals(final, ctx)
+    unused = ctx.budget + sell_proceeds - buy_cost
+    turnover = buy_cost + sell_proceeds
+    trade_count = sum(final[ticker] != ctx.current[ticker] for ticker in _TICKERS)
+    return (
+        *(round(component, _SCORE_DIGITS) for component in score.as_tuple()),
+        round(max(unused, 0.0), 6),
+        round(turnover, 6),
+        trade_count,
+        *(final[ticker] for ticker in _TICKERS),
+    )
+
+
+def _improve_by_legal_lots(
+    initial: dict[str, int],
+    initial_key: tuple,
+    ctx: _PlanningContext,
+) -> dict[str, int]:
+    """Finish the finite seed search with deterministic legal-lot moves.
+
+    Paired moves are important: a sale may be harmful in isolation but useful
+    when it immediately funds another bucket or an intra-bucket conversion,
+    including GLDM -> 518880.SS and SGOV -> 511360.SS.
     """
-    holdings: dict[str, float] = state["holdings"]
-    prices: dict[str, float] = state["prices"]
-    usdcny: float = state["usdcny"]
-    target_weights: dict[str, float] = state["target_weights"]
 
-    tv = ticker_values_cny(holdings, prices, usdcny)
-    bv = bucket_values(tv)
-    V = total_value(bv)
-    w = bucket_weights(bv)
+    best = dict(initial)
+    best_key = initial_key
+    for _ in range(256):
+        next_best = best
+        next_key = best_key
+        moves: list[tuple[tuple[str, int], ...]] = []
+        for ticker in _TICKERS:
+            lot = TICKER_LOT_SIZE[ticker]
+            moves.append(((ticker, lot),))
+            moves.append(((ticker, -lot),))
+        for sell_ticker in _TICKERS:
+            for buy_ticker in _TICKERS:
+                if sell_ticker == buy_ticker:
+                    continue
+                moves.append(
+                    (
+                        (sell_ticker, -TICKER_LOT_SIZE[sell_ticker]),
+                        (buy_ticker, TICKER_LOT_SIZE[buy_ticker]),
+                    )
+                )
 
-    # Deviation check
-    max_dev = max(abs(w[b] - target_weights[b]) for b in BUCKETS)
-    if max_dev < tolerance:
-        return (0.0, {})
+        for move in moves:
+            candidate = dict(best)
+            for ticker, delta in move:
+                candidate[ticker] += delta
+            if not _is_feasible(candidate, ctx):
+                continue
+            candidate_key = _candidate_key(candidate, ctx)
+            if candidate_key < next_key:
+                next_best = candidate
+                next_key = candidate_key
 
-    # Identify underweight buckets
-    under_sum_w = 0.0
-    under_sum_V = 0.0
-    under_buckets = []
-    for b in BUCKETS:
-        target_val = V * target_weights[b]
-        if bv[b] < target_val - EPSILON:
-            under_buckets.append(b)
-            under_sum_w += target_weights[b]
-            under_sum_V += bv[b]
-
-    if not under_buckets:
-        return (0.0, {})
-
-    # Theoretical minimum
-    denom = 1.0 - under_sum_w
-    if abs(denom) < EPSILON:
-        # All buckets under → degenerate
-        max_gap = max(target_weights[b] * V - bv[b] for b in BUCKETS)
-        k = len(BUCKETS)
-        C = max(max_gap * k / (k - 1), MIN_TRADE_AMOUNT * k)
-    else:
-        C = (under_sum_w * V - under_sum_V) / denom
-
-    # Feasibility: ensure at least 1 lot in each under bucket.
-    # Use the most expensive ticker per bucket — _discretize_hamilton picks
-    # the lower-value ticker, so we must guarantee C covers all candidates.
-    for b in under_buckets:
-        tickers = BUCKET_TICKERS[b]
-        max_price_cny = 0.0
-        max_lot = 1
-        for t in tickers:
-            p_cny = prices.get(t, 0.0) * (usdcny if t not in CNY_TICKERS else 1.0)
-            lot = TICKER_LOT_SIZE[t]
-            if p_cny * lot > max_price_cny * max_lot:
-                max_price_cny = p_cny
-                max_lot = lot
-        min_cost = max_lot * max_price_cny
-        alloc_to_b = C * (target_weights[b] * V - bv[b])
-        sum_gaps = sum(max(target_weights[x] * V - bv[x], 0.0) for x in under_buckets)
-        if sum_gaps > EPSILON:
-            alloc_to_b = C * max(target_weights[b] * V - bv[b], 0.0) / sum_gaps
-        if alloc_to_b < min_cost:
-            C = max(C, min_cost * sum_gaps / max(target_weights[b] * V - bv[b], EPSILON))
-
-    # Round up to nearest 100 CNY
-    C = max(math.ceil(C / 100.0) * 100.0, 100.0)
-
-    # Generate plan (gap^1.0 per §4.11 step 6, no elasticity amplification).
-    # Use min_trade=0 so the minimum plan is never filtered empty —
-    # the overshoot check below is the real guard against harmful plans.
-    plan = dca_allocate(C, state, tolerance=tolerance, elasticity=1.0, min_trade=0.0)
-
-    # Over-shoot protection
-    if plan:
-        # Simulate post-allocation
-        new_holdings = dict(holdings)
-        for t, s in plan.items():
-            new_holdings[t] = new_holdings.get(t, 0.0) + s
-        new_tv = ticker_values_cny(new_holdings, prices, usdcny)
-        new_bv = bucket_values(new_tv)
-        new_w = bucket_weights(new_bv)
-        new_max_dev = max(abs(new_w[b] - target_weights[b]) for b in BUCKETS)
-        # Only apply overshoot protection for significant amounts;
-        # small plans should not be blocked even if slightly suboptimal.
-        if new_max_dev >= max_dev - EPSILON and C > OVERSPOOT_PROTECTION_FLOOR:
-            return (C, {})
-
-    return (C, plan)
+        if next_key >= best_key:
+            break
+        best = next_best
+        best_key = next_key
+    return best

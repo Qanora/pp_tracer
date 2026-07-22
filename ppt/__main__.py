@@ -1,25 +1,6 @@
-"""Allow `python -m ppt` invocation.
+"""Run the same CLI entry point as the installed ``ppt`` command."""
 
-Exit codes (§5):
-  0 — normal
-  1 — business error (input, prices, OSS, unknown command)
-  130 — Ctrl+C interrupt
-"""
-
-import sys
-
-from ppt import ensure_logging
-from ppt.cli import main
+from ppt.cli import run
 
 if __name__ == "__main__":
-    ensure_logging()
-    try:
-        main()
-    except KeyboardInterrupt:
-        sys.exit(130)
-    except SystemExit as e:
-        sys.exit(e.code if e.code is not None else 1)
-    except Exception:
-        sys.exit(1)
-    else:
-        sys.exit(0)
+    run()

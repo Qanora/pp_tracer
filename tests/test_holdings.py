@@ -1,480 +1,407 @@
-"""Tests for holdings I/O (§2) — OSS-only storage."""
+"""Tests for the signed, replay-only OSS ledger."""
 
-import uuid
-from contextlib import nullcontext
+from __future__ import annotations
+
+from contextlib import contextmanager
+from copy import deepcopy
+from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 
 from ppt.holdings import (
     HoldingsStore,
-    Transaction,
-    validate_holdings,
-    validate_transaction_input,
+    InsufficientHoldingsError,
+    InvalidLedgerError,
+    InvalidTradeError,
+    LedgerNotInitializedError,
+    Trade,
+    TradeBatch,
+    batch_net_cash_flow,
+    batch_net_investment,
+    cash_summary,
+    derive_holdings,
+    ledger_batches,
+    validate_ledger,
+    validate_trade_input,
 )
-from ppt.storage import OssBackend
+from ppt.storage import ObjectNotFoundError, StorageConfigurationError, StorageError
+
+HOLDINGS_PATH = "oss://test-bucket/pp_holdings.json"
+BACKUP_PREFIX = "oss://test-bucket/backups/pp_holdings"
 
 
 class _FakeBackend:
-    """In-memory storage backend for testing — no ossutil required."""
+    """In-memory implementation of the complete mutation protocol."""
 
     def __init__(self):
-        self._store: dict[str, Any] = {}
+        self.objects: dict[str, dict[str, Any]] = {}
+        self.operations: list[tuple[str, str, str | None]] = []
+        self.fail_exists = False
+        self.fail_read = False
+        self.fail_copy = False
+        self.fail_write = False
+        self.locked = False
+        self.lock_entries = 0
+        self.lock_exits = 0
 
-    def read(self, path: str) -> dict[str, Any] | None:
-        data = self._store.get(path)
-        return data if isinstance(data, dict) else None
+    def exists(self, path: str) -> bool:
+        self.operations.append(("exists", path, None))
+        if self.fail_exists:
+            raise StorageError("exists failed")
+        return path in self.objects
 
-    def read_list(self, path: str) -> list[Any]:
-        data = self._store.get(path)
-        return data if isinstance(data, list) else []
+    def read(self, path: str) -> dict[str, Any]:
+        self.operations.append(("read", path, None))
+        if self.fail_read:
+            raise StorageError("read failed")
+        if path not in self.objects:
+            raise ObjectNotFoundError(path)
+        return deepcopy(self.objects[path])
 
-    def write(self, path: str, data: Any) -> bool:
-        self._store[path] = data
-        return True
+    def write(self, path: str, data: dict[str, Any]) -> None:
+        self.operations.append(("write", path, None))
+        if self.fail_write:
+            raise StorageError("write failed")
+        self.objects[path] = deepcopy(data)
 
+    def copy(self, source: str, destination: str) -> None:
+        self.operations.append(("copy", source, destination))
+        if self.fail_copy:
+            raise StorageError("copy failed")
+        if source not in self.objects:
+            raise ObjectNotFoundError(source)
+        if destination in self.objects:
+            raise StorageError("destination exists")
+        self.objects[destination] = deepcopy(self.objects[source])
 
-def _price(stock, bond, gold, cash):
-    """Build a prices_cny dict with bucket keys."""
-    return {"stock": stock, "bond": bond, "gold": gold, "cash": cash}
-
-
-# ── Validation ────────────────────────────────────────────────────────────────
-
-
-class TestValidateTransactionInput:
-    """Input format: TICKER#shares@price."""
-
-    def test_valid_usd(self):
-        """SPYM#10@72.50 is valid."""
-        result = validate_transaction_input("SPYM", 10, 72.50)
-        assert len(result) == 0
-
-    def test_valid_a_share(self):
-        """518880.SS#1000@5.50 is valid (100-lot)."""
-        result = validate_transaction_input("518880.SS", 1000, 5.50)
-        assert len(result) == 0
-
-    def test_invalid_ticker(self):
-        """Non-whitelist ticker → error."""
-        result = validate_transaction_input("AAPL", 10, 150.0)
-        assert len(result) > 0
-
-    def test_fractional_usd_shares(self):
-        """USD shares must be integer."""
-        result = validate_transaction_input("SPYM", 10.5, 72.50)
-        assert len(result) > 0
-
-    def test_a_share_not_multiple_of_100(self):
-        """A-share shares must be multiple of 100."""
-        result = validate_transaction_input("518880.SS", 150, 5.50)
-        assert len(result) > 0
-
-    def test_zero_or_negative_shares(self):
-        """Shares ≤ 0 → error."""
-        result = validate_transaction_input("SPYM", 0, 72.50)
-        assert len(result) > 0
-
-    def test_zero_or_negative_price(self):
-        """Price ≤ 0 → error."""
-        result = validate_transaction_input("SPYM", 10, 0)
-        assert len(result) > 0
-
-    @pytest.mark.parametrize("value", [float("nan"), float("inf")])
-    def test_non_finite_values_are_rejected_without_crashing(self, value):
-        assert validate_transaction_input("SPYM", value, 72.50)
-        assert validate_transaction_input("SPYM", 10, value)
+    @contextmanager
+    def lock(self, path: str, *, lease_seconds: int = 300):
+        del lease_seconds
+        if self.locked:
+            raise StorageError("already locked")
+        self.operations.append(("lock", path, None))
+        self.locked = True
+        self.lock_entries += 1
+        try:
+            yield
+        finally:
+            self.locked = False
+            self.lock_exits += 1
+            self.operations.append(("unlock", path, None))
 
 
-class TestValidateHoldings:
-    """Full holdings state validation."""
+def _store(backend: _FakeBackend | None = None) -> tuple[HoldingsStore, _FakeBackend]:
+    fake = backend or _FakeBackend()
+    return (
+        HoldingsStore(
+            backend=fake,
+            holdings_path=HOLDINGS_PATH,
+            backup_prefix=BACKUP_PREFIX,
+        ),
+        fake,
+    )
 
-    def test_valid_state(self):
-        result = validate_holdings(
-            {
-                "holdings": {"SPYM": 30, "VGIT": 50},
-                "cash_in": 100000.0,
-                "cash_out": 0.0,
-                "transactions": [],
-                "created_at": "2025-01-01",
-            }
-        )
-        assert result is True
 
-    def test_missing_field(self):
-        result = validate_holdings({"holdings": {}})
-        assert result is False
+def _batch(
+    batch_id: str,
+    trades: tuple[Trade, ...],
+    *,
+    usdcny: float = 7.0,
+) -> TradeBatch:
+    return TradeBatch(
+        batch_id=batch_id,
+        executed_at="2026-07-22T12:00:00+00:00",
+        usdcny=usdcny,
+        trades=trades,
+    )
 
-    def test_negative_cash(self):
-        result = validate_holdings(
-            {
-                "holdings": {},
-                "cash_in": -100.0,
-                "cash_out": 0.0,
-                "transactions": [],
-                "created_at": "2025-01-01",
-            }
-        )
-        assert result is False
 
-    @pytest.mark.parametrize("cash_in", ["100", float("nan"), float("inf")])
-    def test_invalid_cash_type_or_value(self, cash_in):
-        assert (
-            validate_holdings(
-                {
-                    "holdings": {},
-                    "cash_in": cash_in,
-                    "cash_out": 0.0,
-                    "transactions": [],
-                    "created_at": "2025-01-01",
-                }
+def _ledger(*batches: TradeBatch) -> dict[str, Any]:
+    return {
+        "initialized_at": "2026-07-22T00:00:00+00:00",
+        "batches": [batch.to_dict() for batch in batches],
+    }
+
+
+class TestSignedTradeValidation:
+    def test_positive_buy_and_negative_sell_are_valid(self):
+        assert validate_trade_input("SPYM", 10, 72.5) == []
+        assert validate_trade_input("SPYM", -10, 72.5) == []
+        assert validate_trade_input("518880.SS", -100, 5.5) == []
+
+    @pytest.mark.parametrize("shares", [0, 1.5, True, float("nan"), float("inf")])
+    def test_zero_fractional_boolean_and_nonfinite_shares_are_invalid(self, shares):
+        assert validate_trade_input("SPYM", shares, 72.5)
+
+    @pytest.mark.parametrize("shares", [1, -1, 150, -150])
+    def test_a_share_lot_size_applies_to_both_directions(self, shares):
+        assert validate_trade_input("518880.SS", shares, 5.5)
+
+    @pytest.mark.parametrize("price", [0, -1, True, float("nan"), float("inf")])
+    def test_price_must_be_positive_and_finite(self, price):
+        assert validate_trade_input("SPYM", 1, price)
+
+    def test_unknown_ticker_is_invalid(self):
+        assert validate_trade_input("AAPL", 1, 100)
+
+    def test_trade_cannot_be_constructed_invalid(self):
+        with pytest.raises(InvalidTradeError):
+            Trade("518880.SS", -1, 5.5)
+
+    def test_batch_rejects_duplicate_ticker(self):
+        with pytest.raises(InvalidTradeError, match="Duplicate"):
+            _batch(
+                "00000000-0000-0000-0000-000000000001",
+                (Trade("SPYM", 1, 100), Trade("SPYM", -1, 101)),
             )
-            is False
-        )
 
-    def test_invalid_holding_value(self):
-        assert (
-            validate_holdings(
-                {
-                    "holdings": {"SPYM": float("inf")},
-                    "cash_in": 0.0,
-                    "cash_out": 0.0,
-                    "transactions": [],
-                    "created_at": "2025-01-01",
-                }
+
+class TestPureLedgerReplay:
+    def test_old_or_extra_fields_are_not_compatible(self):
+        old = {
+            "holdings": {"SPYM": 1},
+            "cash_in": 700.0,
+            "cash_out": 0.0,
+            "transactions": [],
+            "created_at": "2025-01-01",
+        }
+        assert validate_ledger(old) is False
+        assert validate_ledger({**_ledger(), "version": 1}) is False
+
+    def test_holdings_are_replayed_from_signed_batches(self):
+        first = _batch(
+            "00000000-0000-0000-0000-000000000001",
+            (Trade("SPYM", 10, 100), Trade("518880.SS", 100, 5)),
+        )
+        second = _batch(
+            "00000000-0000-0000-0000-000000000002",
+            (Trade("SPYM", -3, 110),),
+        )
+        ledger = _ledger(first, second)
+
+        holdings = derive_holdings(ledger)
+        assert holdings["SPYM"] == 7
+        assert holdings["518880.SS"] == 100
+        assert ledger_batches(ledger) == (first, second)
+
+    def test_persisted_oversell_is_invalid(self):
+        oversell = _ledger(
+            _batch(
+                "00000000-0000-0000-0000-000000000001",
+                (Trade("SPYM", -1, 100),),
             )
-            is False
         )
+        with pytest.raises(InvalidLedgerError, match="oversells"):
+            derive_holdings(oversell)
+        assert validate_ledger(oversell) is False
 
+    def test_cash_summary_nets_each_mixed_batch_before_accumulating(self):
+        contribution = _batch(
+            "00000000-0000-0000-0000-000000000001",
+            (Trade("SPYM", 10, 100), Trade("518880.SS", 100, 5)),
+            usdcny=7.0,
+        )
+        # Sell ¥1,400 of SPYM and buy ¥1,000 of 518880 in one rebalance:
+        # the batch is one ¥400 withdrawal, not gross input + gross output.
+        rebalance = _batch(
+            "00000000-0000-0000-0000-000000000002",
+            (Trade("SPYM", -2, 100), Trade("518880.SS", 200, 5)),
+            usdcny=7.0,
+        )
+        ledger = _ledger(contribution, rebalance)
 
-# ── HoldingsStore (OSS-mocked) ────────────────────────────────────────────────
+        assert batch_net_cash_flow(contribution) == -7500.0
+        assert batch_net_investment(contribution) == 7500.0
+        assert batch_net_cash_flow(rebalance) == 400.0
+        assert cash_summary(ledger) == {
+            "cash_in": 7500.0,
+            "cash_out": 400.0,
+            "net_cash": 7100.0,
+        }
 
 
 class TestHoldingsStore:
-    """Tests use in-memory store mocked over OSS I/O."""
+    def test_environment_bucket_is_required_and_never_implicit(self, monkeypatch):
+        monkeypatch.delenv("PP_OSS_BUCKET", raising=False)
+        with pytest.raises(StorageConfigurationError, match="required"):
+            HoldingsStore.from_environment()
 
-    @staticmethod
-    def make_store_with_memory():
-        """Create a HoldingsStore with an in-memory fake backend."""
-        return HoldingsStore(backend=_FakeBackend())
+        monkeypatch.setenv("PP_OSS_BUCKET", "isolated-ledger")
+        store = HoldingsStore.from_environment()
+        assert store.holdings_path == "oss://isolated-ledger/pp_holdings.json"
 
-    def test_save_and_load(self):
-        """Round-trip save → load via mocked OSS."""
-        store = self.make_store_with_memory()
-        data = {
-            "holdings": {"SPYM": 30.0, "VGIT": 50.0},
-            "cash_in": 100000.0,
-            "cash_out": 0.0,
-            "transactions": [],
-            "created_at": "2025-06-19",
-        }
-        store.save(data)
-        loaded = store.load()
-        assert loaded is not None
-        assert loaded["holdings"]["SPYM"] == 30.0
-        assert loaded["cash_in"] == 100000.0
-
-    def test_load_empty_returns_none(self):
-        """Loading from empty OSS returns None."""
-        store = self.make_store_with_memory()
+    def test_load_returns_none_only_for_missing_object(self):
+        store, backend = _store()
         assert store.load() is None
 
-    def test_add_transaction(self):
-        """Adding a transaction updates holdings."""
-        store = self.make_store_with_memory()
-        tickers = ["SPYM", "AVUV", "VGIT", "GLDM", "518880.SS", "SGOV", "511360.SS"]
-        store.save(
-            {
-                "holdings": {t: 0.0 for t in tickers},
-                "cash_in": 0.0,
-                "cash_out": 0.0,
-                "transactions": [],
-                "created_at": "2025-01-01",
-            }
-        )
-        txn = Transaction(
-            txn_id=str(uuid.uuid4()),
-            date="2025-06-19",
-            txn_type="buy",
-            trades=[{"ticker": "SPYM", "shares": 10, "price": 72.50, "currency": "USD"}],
-            usdcny=7.25,
-        )
-        store.add_transaction(txn)
-        state = store.load()
-        assert state is not None
-        assert state["holdings"]["SPYM"] == 10.0
+        backend.fail_read = True
+        with pytest.raises(StorageError, match="read failed"):
+            store.load()
 
-    def test_internal_transaction_does_not_change_external_cash_flow(self):
-        store = self.make_store_with_memory()
-        store.save(
-            {
-                "holdings": {"SPYM": 10.0},
-                "cash_in": 1000.0,
-                "cash_out": 0.0,
-                "transactions": [],
-                "created_at": "2025-01-01",
-            }
-        )
-        txn = Transaction(
-            txn_id=str(uuid.uuid4()),
-            date="2025-06-19",
-            txn_type="sell",
-            trades=[{"ticker": "SPYM", "shares": 2, "price": 72.50, "currency": "USD"}],
-            usdcny=7.25,
-            internal=True,
-        )
+    def test_load_rejects_old_format(self):
+        store, backend = _store()
+        backend.objects[HOLDINGS_PATH] = {"holdings": {}, "transactions": []}
+        with pytest.raises(InvalidLedgerError):
+            store.load()
 
-        store.add_transaction(txn)
-        state = store.load()
+    def test_initialize_missing_object_creates_without_backup(self):
+        store, backend = _store()
+        backup_path = store.initialize()
 
-        assert state["holdings"]["SPYM"] == 8.0
-        assert state["cash_in"] == 1000.0
-        assert state["cash_out"] == 0.0
-        assert state["transactions"][-1]["internal"] is True
+        assert backup_path is None
+        assert validate_ledger(backend.objects[HOLDINGS_PATH])
+        assert not [operation for operation in backend.operations if operation[0] == "copy"]
+        assert backend.lock_entries == backend.lock_exits == 1
 
-    def test_undo_last_transaction(self):
-        """Undo reverts the last transaction."""
-        store = self.make_store_with_memory()
-        store.save(
-            {
-                "holdings": {
-                    "SPYM": 10.0,
-                    "AVUV": 0,
-                    "VGIT": 20.0,
-                    "GLDM": 0,
-                    "518880.SS": 0,
-                    "SGOV": 50.0,
-                    "511360.SS": 0,
-                },
-                "cash_in": 50000.0,
-                "cash_out": 0.0,
-                "transactions": [],
-                "created_at": "2025-01-01",
-            }
-        )
-        txn = Transaction(
-            txn_id=str(uuid.uuid4()),
-            date="2025-06-19",
-            txn_type="sell",
-            trades=[{"ticker": "SPYM", "shares": 5, "price": 80.0, "currency": "USD"}],
-            usdcny=7.30,
-        )
-        store.add_transaction(txn)
-        before_undo = store.load()
-        assert before_undo["holdings"]["SPYM"] == 5.0  # 10 - 5
+    def test_initialize_backs_up_any_existing_object_before_reset(self):
+        store, backend = _store()
+        old_object = {"arbitrary": "old or corrupt data"}
+        backend.objects[HOLDINGS_PATH] = deepcopy(old_object)
 
-        store.undo_last()
-        after_undo = store.load()
-        assert after_undo["holdings"]["SPYM"] == 10.0  # restored
-        assert after_undo["cash_in"] == 50000.0
-        assert after_undo["cash_out"] == 0.0
+        backup_path = store.initialize()
 
-    @pytest.mark.parametrize("txn_type,cash_key", [("buy", "cash_in"), ("sell", "cash_out")])
-    def test_undo_restores_external_cash_totals(self, txn_type, cash_key):
-        store = self.make_store_with_memory()
-        store.save(
-            {
-                "holdings": {"SPYM": 10.0},
-                "cash_in": 0.0,
-                "cash_out": 0.0,
-                "transactions": [],
-                "created_at": "2025-01-01",
-            }
-        )
-        txn = Transaction(
-            txn_id=str(uuid.uuid4()),
-            date="2025-06-19",
-            txn_type=txn_type,
-            trades=[{"ticker": "SPYM", "shares": 2, "price": 100.0, "currency": "USD"}],
+        assert backup_path is not None
+        assert backend.objects[backup_path] == old_object
+        assert validate_ledger(backend.objects[HOLDINGS_PATH])
+        operation_names = [operation[0] for operation in backend.operations]
+        assert operation_names.index("copy") < operation_names.index("write")
+
+    def test_initialize_backup_failure_keeps_existing_object(self):
+        store, backend = _store()
+        original = {"old": "must survive"}
+        backend.objects[HOLDINGS_PATH] = deepcopy(original)
+        backend.fail_copy = True
+
+        with pytest.raises(StorageError, match="copy failed"):
+            store.initialize()
+
+        assert backend.objects[HOLDINGS_PATH] == original
+        assert not [operation for operation in backend.operations if operation[0] == "write"]
+        assert backend.locked is False
+
+    def test_initialize_write_failure_keeps_existing_object_and_backup(self):
+        store, backend = _store()
+        original = {"old": "must survive"}
+        backend.objects[HOLDINGS_PATH] = deepcopy(original)
+        backend.fail_write = True
+
+        with pytest.raises(StorageError, match="write failed"):
+            store.initialize()
+
+        assert backend.objects[HOLDINGS_PATH] == original
+        backup_paths = [
+            path for path in backend.objects if path.startswith(f"{BACKUP_PREFIX}/")
+        ]
+        assert len(backup_paths) == 1
+        assert backend.objects[backup_paths[0]] == original
+        assert backend.locked is False
+
+    def test_record_batch_appends_signed_trades_and_derives_holdings(self):
+        store, backend = _store()
+        store.initialize()
+        batch = store.record_batch(
+            [Trade("SPYM", 10, 100), Trade("518880.SS", 100, 5)],
             usdcny=7.0,
         )
+        sold = store.record_batch([Trade("SPYM", -2, 110)], usdcny=7.1)
 
-        store.add_transaction(txn)
-        assert store.load()[cash_key] == 1400.0
-        store.undo_last()
+        ledger = store.load()
+        assert ledger is not None
+        assert ledger_batches(ledger) == (batch, sold)
+        assert derive_holdings(ledger)["SPYM"] == 8
+        assert derive_holdings(ledger)["518880.SS"] == 100
 
-        state = store.load()
-        assert state["cash_in"] == 0.0
-        assert state["cash_out"] == 0.0
+        backups = [path for path in backend.objects if path.startswith(f"{BACKUP_PREFIX}/")]
+        assert len(backups) == 2
+        assert len(set(backups)) == 2
 
-    def test_batch_rejects_oversell_without_partial_update(self):
-        store = self.make_store_with_memory()
-        initial = {
-            "holdings": {"SPYM": 10.0, "VGIT": 0.0},
-            "cash_in": 0.0,
-            "cash_out": 0.0,
-            "transactions": [],
-            "created_at": "2025-01-01",
-        }
-        store.save(initial)
-        transactions = [
-            Transaction(
-                str(uuid.uuid4()),
-                "2025-06-19",
-                "buy",
-                [{"ticker": "VGIT", "shares": 1, "price": 50.0, "currency": "USD"}],
-                7.0,
-                internal=True,
-            ),
-            Transaction(
-                str(uuid.uuid4()),
-                "2025-06-19",
-                "sell",
-                [{"ticker": "SPYM", "shares": 11, "price": 100.0, "currency": "USD"}],
-                7.0,
-                internal=True,
-            ),
-        ]
+    def test_oversell_rejects_entire_batch_before_backup_or_write(self):
+        store, backend = _store()
+        store.initialize()
+        store.record_batch([Trade("SPYM", 10, 100)], usdcny=7.0)
+        original = deepcopy(backend.objects[HOLDINGS_PATH])
+        prior_operations = len(backend.operations)
 
-        with pytest.raises(ValueError, match="Insufficient holdings"):
-            store.add_transactions(transactions)
-
-        assert store.load() == initial
-
-    def test_backup_failure_prevents_primary_write(self, tmp_path, monkeypatch):
-        backend = OssBackend("ossutil")
-        monkeypatch.setattr(backend, "lock", lambda _: nullcontext())
-        monkeypatch.setattr(backend, "copy", lambda _source, _destination: False)
-        backend.write = MagicMock(return_value=True)
-        store = HoldingsStore(local_dir=tmp_path, backend=backend)
-        state = {
-            "holdings": {},
-            "cash_in": 0.0,
-            "cash_out": 0.0,
-            "transactions": [],
-            "created_at": "2025-01-01",
-        }
-
-        with pytest.raises(RuntimeError, match="back up"):
-            store.save(state)
-
-        backend.write.assert_not_called()
-
-    def test_undo_empty_history(self):
-        """Undo with no transactions → no error."""
-        store = self.make_store_with_memory()
-        store.save(
-            {
-                "holdings": {},
-                "cash_in": 0,
-                "cash_out": 0,
-                "transactions": [],
-                "created_at": "2025-01-01",
-            }
-        )
-        store.undo_last()  # should not raise
-
-    def test_undo_clamp_negative(self):
-        """Undo that would cause negative holdings → clamp to 0 + warning."""
-        store = self.make_store_with_memory()
-        store.save(
-            {
-                "holdings": {
-                    "SPYM": 0.0,
-                    "AVUV": 0,
-                    "VGIT": 0,
-                    "GLDM": 0,
-                    "518880.SS": 0,
-                    "SGOV": 0,
-                    "511360.SS": 0,
-                },
-                "cash_in": 0,
-                "cash_out": 0,
-                "transactions": [],
-                "created_at": "2025-01-01",
-            }
-        )
-        txn = Transaction(
-            txn_id=str(uuid.uuid4()),
-            date="2025-06-19",
-            txn_type="buy",
-            trades=[{"ticker": "SPYM", "shares": 10, "price": 72.50, "currency": "USD"}],
-            usdcny=7.25,
-        )
-        store.add_transaction(txn)
-        # Manually corrupt holdings to 0
-        state = store.load()
-        state["holdings"]["SPYM"] = 0.0
-        store.save(state)
-        # Undo should clamp
-        store.undo_last()
-        after = store.load()
-        assert after["holdings"]["SPYM"] >= 0  # not negative
-
-    def test_price_history_update(self):
-        """price_history is appended/updated."""
-        store = self.make_store_with_memory()
-        entry = {
-            "date": "2025-06-19",
-            "prices_cny": {"stock": 525.0, "bond": 425.0, "gold": 217.5, "cash": 725.0},
-        }
-        store.update_price_history(entry)
-        history = store.load_price_history()
-        assert len(history) >= 1
-        assert history[-1]["date"] == "2025-06-19"
-
-    def test_price_history_trims_to_max(self):
-        """History trimmed to 120 entries."""
-        store = self.make_store_with_memory()
-        for i in range(150):
-            store.update_price_history(
-                {
-                    "date": f"2025-{i % 12 + 1:02d}-{i % 28 + 1:02d}",
-                    "prices_cny": {"stock": 500.0, "bond": 400.0, "gold": 200.0, "cash": 700.0},
-                }
+        with pytest.raises(InsufficientHoldingsError, match="SPYM"):
+            store.record_batch(
+                [Trade("VGIT", 1, 50), Trade("SPYM", -11, 100)],
+                usdcny=7.0,
             )
-        history = store.load_price_history()
-        assert len(history) <= 120
 
-    # ── clean_price_history ─────────────────────────────────────────────────
+        assert backend.objects[HOLDINGS_PATH] == original
+        new_operations = backend.operations[prior_operations:]
+        assert not [operation for operation in new_operations if operation[0] in {"copy", "write"}]
+        assert backend.locked is False
 
-    def test_clean_price_history_removes_all_nan_entries(self):
-        """Entries where every bucket price is NaN are removed."""
-        store = self.make_store_with_memory()
-        p = _price  # shorthand
-        nan = float("nan")
-        history = [
-            {"date": "2025-01-01", "prices_cny": p(100, 200, 300, 400)},
-            {"date": "2025-01-02", "prices_cny": p(nan, nan, nan, nan)},
-            {"date": "2025-01-03", "prices_cny": p(101, 201, 301, 401)},
-        ]
-        store._save_price_history(history)
-        removed = store.clean_price_history()
-        assert removed == 1
-        cleaned = store.load_price_history()
-        assert len(cleaned) == 2
-        assert cleaned[0]["date"] == "2025-01-01"
-        assert cleaned[1]["date"] == "2025-01-03"
+    def test_invalid_batch_has_no_storage_side_effects(self):
+        store, backend = _store()
+        store.initialize()
+        prior_operations = list(backend.operations)
 
-    def test_clean_price_history_removes_partial_nan_entries(self):
-        """Entries with any NaN bucket price are removed."""
-        store = self.make_store_with_memory()
-        p = _price
-        history = [
-            {"date": "2025-01-01", "prices_cny": p(100, float("nan"), 300, 400)},
-            {"date": "2025-01-02", "prices_cny": p(200, 200, 200, 200)},
-        ]
-        store._save_price_history(history)
-        removed = store.clean_price_history()
-        assert removed == 1
-        cleaned = store.load_price_history()
-        assert len(cleaned) == 1
-        assert cleaned[0]["date"] == "2025-01-02"
+        with pytest.raises(InvalidTradeError):
+            store.record_batch(
+                [Trade("SPYM", 1, 100), "not-a-trade"],  # type: ignore[list-item]
+                usdcny=7.0,
+            )
 
-    def test_clean_price_history_no_nan_entries(self):
-        """No-op when there are no NaN entries."""
-        store = self.make_store_with_memory()
-        history = [
-            {"date": "2025-01-01", "prices_cny": _price(100, 200, 300, 400)},
-        ]
-        store._save_price_history(history)
-        removed = store.clean_price_history()
-        assert removed == 0
-        assert len(store.load_price_history()) == 1
+        assert backend.operations == prior_operations
 
-    def test_clean_price_history_empty_history(self):
-        """No-op on empty history."""
-        store = self.make_store_with_memory()
-        removed = store.clean_price_history()
-        assert removed == 0
+    def test_record_before_initialize_is_explicit_and_releases_lock(self):
+        store, backend = _store()
+        with pytest.raises(LedgerNotInitializedError, match="init"):
+            store.record_batch([Trade("SPYM", 1, 100)], usdcny=7.0)
+        assert backend.locked is False
+        assert backend.lock_entries == backend.lock_exits == 1
+
+    def test_backup_failure_prevents_primary_write_and_releases_lock(self):
+        store, backend = _store()
+        store.initialize()
+        original = deepcopy(backend.objects[HOLDINGS_PATH])
+        backend.fail_copy = True
+
+        with pytest.raises(StorageError, match="copy failed"):
+            store.record_batch([Trade("SPYM", 1, 100)], usdcny=7.0)
+
+        assert backend.objects[HOLDINGS_PATH] == original
+        assert backend.locked is False
+
+    def test_write_failure_keeps_primary_and_preserves_new_backup(self):
+        store, backend = _store()
+        store.initialize()
+        original = deepcopy(backend.objects[HOLDINGS_PATH])
+        existing_paths = set(backend.objects)
+        backend.fail_write = True
+
+        with pytest.raises(StorageError, match="write failed"):
+            store.record_batch([Trade("SPYM", 1, 100)], usdcny=7.0)
+
+        assert backend.objects[HOLDINGS_PATH] == original
+        new_paths = set(backend.objects) - existing_paths
+        assert len(new_paths) == 1
+        backup_path = new_paths.pop()
+        assert backend.objects[backup_path] == original
+        assert backend.locked is False
+
+    def test_init_read_probe_failure_never_writes(self):
+        store, backend = _store()
+        original = {"old": "must survive"}
+        backend.objects[HOLDINGS_PATH] = deepcopy(original)
+        backend.fail_exists = True
+
+        with pytest.raises(StorageError, match="exists failed"):
+            store.initialize()
+
+        assert backend.objects[HOLDINGS_PATH] == original
+        assert not [operation for operation in backend.operations if operation[0] == "write"]
+        assert backend.locked is False
+
+    def test_generated_timestamps_are_timezone_aware(self):
+        store, _backend = _store()
+        store.initialize()
+        ledger = store.load()
+        initialized = datetime.fromisoformat(ledger["initialized_at"])
+        assert initialized.tzinfo is not None
+
+        batch = store.record_batch([Trade("SPYM", 1, 100)], usdcny=7.0)
+        assert datetime.fromisoformat(batch.executed_at).astimezone(UTC).tzinfo is not None

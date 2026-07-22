@@ -1,402 +1,184 @@
-"""Tests for rebalancing engine (§4.6–§4.7, §4.11)."""
+"""Tests for the unified lexicographic planner."""
+
+import math
 
 import pytest
 
-from ppt.constants import BUCKETS, EPSILON
-from ppt.rebalance import (
-    dca_allocate,
-    dca_minimum_plan,
-    multi_over_rebalance,
-    multi_under_rebalance,
-    single_over_rebalance,
+from ppt.constants import BUCKET_TICKERS, CNY_TICKERS, TICKER_LOT_SIZE
+from ppt.rebalance import PlanResult, build_plan
+
+PRICES = {
+    "SPYM": 100.0,
+    "AVUV": 100.0,
+    "VGIT": 100.0,
+    "GLDM": 100.0,
+    "SGOV": 100.0,
+    "518880.SS": 1.0,
+    "511360.SS": 1.0,
+}
+
+
+def holdings_for_bucket_values(
+    stock: int,
+    bond: int,
+    gold: int,
+    cash: int,
+) -> dict[str, int]:
+    """Create internally equal holdings; values must be multiples of 200."""
+
+    assert all(value % 200 == 0 for value in (stock, bond, gold, cash))
+    return {
+        "SPYM": stock // 200,
+        "AVUV": stock // 200,
+        "VGIT": bond // 100,
+        "GLDM": gold // 200,
+        "518880.SS": gold // 2,
+        "SGOV": cash // 200,
+        "511360.SS": cash // 2,
+    }
+
+
+def bucket_trade_value(trades: dict[str, int], bucket: str) -> float:
+    return sum(
+        trades.get(ticker, 0)
+        * PRICES[ticker]
+        * (1.0 if ticker in CNY_TICKERS else 1.0)
+        for ticker in BUCKET_TICKERS[bucket]
+    )
+
+
+def assert_legal_and_funded(result: PlanResult, budget: float) -> None:
+    assert result.buy_cost <= budget + result.sell_proceeds + 1e-7
+    assert result.unused_amount == pytest.approx(
+        budget + result.sell_proceeds - result.buy_cost
+    )
+    assert len(result.trades) == len(set(result.trades))
+    for ticker, shares in result.final_holdings.items():
+        assert shares >= 0
+        assert shares % TICKER_LOT_SIZE[ticker] == 0
+    for ticker, delta in result.trades.items():
+        assert delta != 0
+        assert delta % TICKER_LOT_SIZE[ticker] == 0
+
+
+def test_empty_portfolio_gets_one_unified_fully_funded_plan() -> None:
+    result = build_plan({}, PRICES, usdcny=1.0, budget=40_000.0)
+
+    assert isinstance(result, PlanResult)
+    assert result.corridor_breached is False
+    assert result.buy_cost == pytest.approx(40_000.0)
+    assert result.sell_proceeds == 0.0
+    assert result.unused_amount == 0.0
+    assert result.after_score.bucket_max == pytest.approx(0.0)
+    assert result.after_score.intra_max == pytest.approx(0.0)
+    assert all(delta > 0 for delta in result.trades.values())
+    assert_legal_and_funded(result, 40_000.0)
+
+
+def test_inside_corridor_never_has_cross_bucket_net_sale() -> None:
+    holdings = holdings_for_bucket_values(30_000, 30_000, 20_000, 20_000)
+    result = build_plan(holdings, PRICES, usdcny=1.0, budget=2_000.0)
+
+    assert result.corridor_breached is False
+    for bucket in BUCKET_TICKERS:
+        assert bucket_trade_value(result.trades, bucket) >= -1e-7
+    assert_legal_and_funded(result, 2_000.0)
+
+
+def test_corridor_breach_allows_overweight_bucket_to_fund_others() -> None:
+    holdings = holdings_for_bucket_values(40_000, 20_000, 20_000, 20_000)
+    result = build_plan(holdings, PRICES, usdcny=1.0, budget=100.0)
+
+    assert result.corridor_breached is True
+    assert bucket_trade_value(result.trades, "stock") < 0
+    assert any(
+        bucket_trade_value(result.trades, bucket) > 0
+        for bucket in ("bond", "gold", "cash")
+    )
+    assert result.after_score.bucket_max < result.before_score.bucket_max
+    assert_legal_and_funded(result, 100.0)
+
+
+def test_low_corridor_breach_can_draw_from_buckets_above_target() -> None:
+    holdings = holdings_for_bucket_values(30_000, 30_000, 30_000, 10_000)
+    result = build_plan(holdings, PRICES, usdcny=1.0, budget=100.0)
+
+    assert result.corridor_breached is True
+    assert bucket_trade_value(result.trades, "cash") > 0
+    assert any(
+        bucket_trade_value(result.trades, bucket) < 0
+        for bucket in ("stock", "bond", "gold")
+    )
+    assert_legal_and_funded(result, 100.0)
+
+
+def test_bucket_priority_beats_currency_priority() -> None:
+    holdings = holdings_for_bucket_values(6_000, 8_000, 8_000, 8_000)
+    result = build_plan(holdings, PRICES, usdcny=1.0, budget=100.0)
+
+    # The only priority-one improvement is an additional USD stock share.
+    assert bucket_trade_value(result.trades, "stock") == pytest.approx(100.0)
+    assert all(ticker in {"SPYM", "AVUV"} for ticker in result.trades)
+    assert result.after_score.bucket_max < result.before_score.bucket_max
+
+
+def test_intra_bucket_priority_beats_currency_even_when_currency_worsens() -> None:
+    holdings = holdings_for_bucket_values(10_000, 10_000, 10_000, 10_000)
+    holdings["GLDM"] = 20
+    holdings["518880.SS"] = 8_000
+    result = build_plan(holdings, PRICES, usdcny=1.0, budget=1_600.0)
+
+    assert result.trades["GLDM"] > 0
+    # CNY gold may not be sold for a reverse active conversion.
+    assert "518880.SS" not in result.trades
+    for bucket in BUCKET_TICKERS:
+        assert bucket_trade_value(result.trades, bucket) == pytest.approx(400.0)
+    assert result.after_score.bucket_max == pytest.approx(result.before_score.bucket_max)
+    assert result.after_score.intra_max < result.before_score.intra_max
+    assert result.after_score.currency > result.before_score.currency
+    assert_legal_and_funded(result, 1_600.0)
+
+
+@pytest.mark.parametrize(
+    ("source", "target"),
+    (("GLDM", "518880.SS"), ("SGOV", "511360.SS")),
 )
+def test_usd_to_cny_conversion_is_part_of_the_single_net_plan(
+    source: str,
+    target: str,
+) -> None:
+    holdings = holdings_for_bucket_values(10_000, 10_000, 10_000, 10_000)
+    holdings[source] = 80
+    holdings[target] = 2_000
+    result = build_plan(holdings, PRICES, usdcny=1.0, budget=100.0)
 
-# ── §4.6 强制再平衡 ──────────────────────────────────────────────────────────
-
-
-class TestSingleOverRebalance:
-    """§4.6 单桶超标 — 解析解."""
-
-    def test_basic(self):
-        """Stock overweight → sell shares."""
-        # V_b = 4000, w* = 0.25, V = 10000, p = 100
-        # s = (4000 - 0.25 * 10000) / (100 * (1 - 0.25)) = 1500/75 = 20
-        result = single_over_rebalance(
-            V_b=4000.0,
-            w_star=0.25,
-            V=10000.0,
-            price=100.0,
-        )
-        assert result == pytest.approx(20.0)
-
-    def test_ceil_shares(self):
-        """Shares rounded UP (ceil), clamped to holdings."""
-        # s = (4000 - 0.25 * 10000) / (100 * 0.75) = 20.0
-        # But with non-integer: (3500 - 0.25 * 9000) / (72.5 * 0.75) = 1250/54.375 ≈ 22.988
-        result = single_over_rebalance(
-            V_b=3500.0,
-            w_star=0.25,
-            V=9000.0,
-            price=72.5,
-            max_shares=50.0,
-        )
-        assert result == pytest.approx(23.0)  # ceil(22.988)
-        assert result <= 50.0  # clamped to holdings
-
-    def test_not_over(self):
-        """Bucket at or below target → return 0."""
-        result = single_over_rebalance(
-            V_b=2000.0,
-            w_star=0.25,
-            V=10000.0,
-            price=100.0,
-        )
-        assert result == 0.0
-
-    def test_zero_price(self):
-        """Zero price → return 0."""
-        result = single_over_rebalance(
-            V_b=4000.0,
-            w_star=0.25,
-            V=10000.0,
-            price=0.0,
-        )
-        assert result == 0.0
+    assert result.trades[source] < 0
+    assert result.trades[target] > 0
+    assert result.after_score.intra_max < result.before_score.intra_max
+    assert_legal_and_funded(result, 100.0)
 
 
-class TestMultiOverRebalance:
-    """§4.6 多桶同时超标 — 联立方程."""
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("budget", 0.0), ("budget", math.inf), ("usdcny", 0.0)),
+)
+def test_invalid_scalar_inputs_are_rejected(field: str, value: float) -> None:
+    kwargs = {"holdings": {}, "prices": PRICES, "usdcny": 1.0, "budget": 100.0}
+    kwargs[field] = value
 
-    def test_clamps_each_sale_to_available_holdings(self):
-        result = multi_over_rebalance(
-            {
-                "stock": {
-                    "V_b": 8000.0,
-                    "w_star": 0.25,
-                    "price": 100.0,
-                    "max_shares": 5,
-                },
-                "bond": {
-                    "V_b": 6000.0,
-                    "w_star": 0.25,
-                    "price": 100.0,
-                    "max_shares": 7,
-                },
-            },
-            V=20000.0,
-        )
-        assert result["stock"] <= 5
-        assert result["bond"] <= 7
-
-    def test_two_over(self):
-        """Two overweight buckets solved simultaneously."""
-        # V = 10000, stock=4000(over), bond=4000(over), gold=1000, cash=1000
-        # w* all = 0.25
-        # S = (4000+4000 - 10000*(0.25+0.25)) / (1 - 0.25 - 0.25)
-        #   = (8000 - 5000) / 0.5 = 6000
-        over = {
-            "stock": {"V_b": 4000.0, "w_star": 0.25, "price": 72.5},
-            "bond": {"V_b": 4000.0, "w_star": 0.25, "price": 58.92},
-        }
-        V = 10000.0
-        result = multi_over_rebalance(over, V)
-        total_sell = sum(result.values())
-        assert total_sell > 0
-        assert "stock" in result
-        assert "bond" in result
-
-    def test_single_over_in_multi(self):
-        """One overweight → equivalent to single formula."""
-        over = {
-            "stock": {"V_b": 4000.0, "w_star": 0.25, "price": 100.0},
-        }
-        V = 10000.0
-        result = multi_over_rebalance(over, V)
-        assert result["stock"] == pytest.approx(20.0)
-
-    def test_all_over_degenerate(self):
-        """All 4 buckets over → degenerate: each solved independently."""
-        over = {
-            "stock": {"V_b": 3000.0, "w_star": 0.25, "price": 72.5},
-            "bond": {"V_b": 3000.0, "w_star": 0.25, "price": 58.92},
-            "gold": {"V_b": 3000.0, "w_star": 0.25, "price": 30.0},
-            "cash": {"V_b": 2000.0, "w_star": 0.25, "price": 100.0},
-        }
-        result = multi_over_rebalance(over, V=11000.0)
-        assert len(result) > 0
+    with pytest.raises(ValueError):
+        build_plan(**kwargs)
 
 
-class TestMultiUnderRebalance:
-    """§4.6 多桶同时低配 — 联立方程."""
+def test_missing_or_invalid_prices_and_illegal_holdings_are_rejected() -> None:
+    missing = dict(PRICES)
+    missing.pop("VGIT")
+    with pytest.raises(ValueError, match="missing prices"):
+        build_plan({}, missing, 1.0, 100.0)
 
-    def test_two_under(self):
-        """Two underweight buckets → buy amounts."""
-        under = {
-            "gold": {"V_b": 500.0, "w_star": 0.25, "price": 30.0},
-            "cash": {"V_b": 500.0, "w_star": 0.25, "price": 100.0},
-        }
-        V = 10000.0  # stock=4500, bond=4500
-        result = multi_under_rebalance(under, V)
-        assert "gold" in result
-        assert "cash" in result
-        # Total buy > 0
-        assert sum(result.values()) > 0
+    invalid = dict(PRICES, VGIT=float("nan"))
+    with pytest.raises(ValueError, match="invalid price"):
+        build_plan({}, invalid, 1.0, 100.0)
 
-    def test_single_under_in_multi(self):
-        """One underweight."""
-        under = {
-            "gold": {"V_b": 500.0, "w_star": 0.25, "price": 30.0},
-        }
-        V = 10000.0
-        result = multi_under_rebalance(under, V)
-        assert result["gold"] > 0
-
-
-class TestSelfFundingConstraint:
-    """§4.6 自筹资金约束: buy_total ≤ sell_total."""
-
-    def test_scale_down_buys(self):
-        """If buys exceed sells, scale down proportionally."""
-        # This is tested indirectly via multi_over + multi_under together
-        # in practice: rebalance flow calls over first, then constrains under
-        pass  # Integration test — verified in full flow
-
-
-# ── §4.7 增量分配（定投）────────────────────────────────────────────────────
-
-
-class TestDCAAllocate:
-    """§4.7 定投分配."""
-
-    def make_state(self, holdings, prices, usdcny=7.25):
-        """Helper to set up a typical portfolio state."""
-        return {
-            "holdings": holdings,
-            "prices": prices,
-            "usdcny": usdcny,
-            "target_weights": {b: 0.25 for b in BUCKETS},
-        }
-
-    def test_equal_split_first_buy(self):
-        """Zero holdings → equal 25% split."""
-        state = self.make_state(
-            holdings={
-                t: 0.0 for t in ["SPYM", "AVUV", "VGIT", "GLDM", "518880.SS", "SGOV", "511360.SS"]
-            },
-            prices={
-                "SPYM": 72.5,
-                "AVUV": 120.0,
-                "VGIT": 58.92,
-                "GLDM": 30.0,
-                "518880.SS": 5.50,
-                "SGOV": 100.0,
-                "511360.SS": 100.0,
-            },
-        )
-        result = dca_allocate(C=10000.0, state=state, tolerance=0.005)
-        assert len(result) > 0
-        # Total allocated ≈ C
-        total = sum(
-            s * state["prices"][t] * (7.25 if t not in {"518880.SS", "511360.SS"} else 1.0)
-            for t, s in result.items()
-        )
-        assert total <= 10000.0 + EPSILON
-
-    def test_gap_identification(self):
-        """Only underweight buckets receive allocation."""
-        # Setup: gold is severely underweight
-        holdings = {
-            "SPYM": 30,
-            "AVUV": 5,
-            "VGIT": 50,
-            "GLDM": 10,
-            "518880.SS": 0,
-            "SGOV": 80,
-            "511360.SS": 0,
-        }
-        prices = {
-            "SPYM": 72.5,
-            "AVUV": 120.0,
-            "VGIT": 58.92,
-            "GLDM": 30.0,
-            "518880.SS": 5.50,
-            "SGOV": 100.0,
-            "511360.SS": 100.0,
-        }
-        state = self.make_state(holdings, prices)
-        result = dca_allocate(C=5000.0, state=state, tolerance=0.005, elasticity=1.5)
-        # Gold bucket should get allocation
-        gold_tickers = {"GLDM", "518880.SS"}
-        gold_alloc = sum(s for t, s in result.items() if t in gold_tickers)
-        assert gold_alloc > 0
-
-    def test_min_trade_amount_filter(self):
-        """Allocations below MIN_TRADE_AMOUNT(¥500) are removed iteratively.
-        With small C relative to min_trade, only 1-2 buckets get allocation."""
-        state = self.make_state(
-            holdings={
-                "SPYM": 10,
-                "AVUV": 5,
-                "VGIT": 10,
-                "GLDM": 5,
-                "518880.SS": 0,
-                "SGOV": 10,
-                "511360.SS": 0,
-            },
-            prices={
-                "SPYM": 72.5,
-                "AVUV": 120.0,
-                "VGIT": 58.92,
-                "GLDM": 30.0,
-                "518880.SS": 5.50,
-                "SGOV": 100.0,
-                "511360.SS": 100.0,
-            },
-        )
-        result = dca_allocate(C=2000.0, state=state, min_trade=500.0)
-        # With C=2000 and min_trade=500, each surviving bucket ≥ ¥500
-        for t, s in result.items():
-            price_cny = state["prices"][t] * (7.25 if t not in {"518880.SS", "511360.SS"} else 1.0)
-            assert s * price_cny >= 500.0 - EPSILON
-
-    def test_tolerance_band_skips(self):
-        """Buckets within tolerance band get no allocation."""
-        # All buckets exactly at 25% → no gaps beyond tolerance
-        holdings = {
-            "SPYM": 30,
-            "AVUV": 5,
-            "VGIT": 50,
-            "GLDM": 80,
-            "518880.SS": 0,
-            "SGOV": 100,
-            "511360.SS": 0,
-        }
-        prices = {
-            "SPYM": 72.5,
-            "AVUV": 120.0,
-            "VGIT": 58.92,
-            "GLDM": 30.0,
-            "518880.SS": 5.50,
-            "SGOV": 100.0,
-            "511360.SS": 100.0,
-        }
-        state = self.make_state(holdings, prices)
-        # With large tolerance, no allocation
-        result = dca_allocate(C=1000.0, state=state, tolerance=0.50)
-        # Should still allocate something (tolerance 50% is huge, gaps might be small)
-        # Just verify it runs
-        assert isinstance(result, dict)
-
-    def test_discretization_hamilton(self):
-        """Discretization uses Hamilton method (max remainder)."""
-        state = self.make_state(
-            holdings={
-                t: 0.0 for t in ["SPYM", "AVUV", "VGIT", "GLDM", "518880.SS", "SGOV", "511360.SS"]
-            },
-            prices={
-                "SPYM": 72.5,
-                "AVUV": 120.0,
-                "VGIT": 58.92,
-                "GLDM": 30.0,
-                "518880.SS": 5.50,
-                "SGOV": 100.0,
-                "511360.SS": 100.0,
-            },
-        )
-        result = dca_allocate(C=10000.0, state=state)
-        # All shares should be integers (whole shares for US, multiples of 100 for A-share)
-        for t, s in result.items():
-            assert s == int(s)
-            if t.endswith(".SS"):
-                assert s % 100 == 0
-
-
-# ── §4.11 定投达标方案 ───────────────────────────────────────────────────────
-
-
-class TestDCAMinimumPlan:
-    """§4.11 无参 ppt plan — 最小投入达标."""
-
-    def make_state(self, holdings, prices, usdcny=7.25):
-        return {
-            "holdings": holdings,
-            "prices": prices,
-            "usdcny": usdcny,
-            "target_weights": {b: 0.25 for b in BUCKETS},
-        }
-
-    def test_already_balanced(self):
-        """Already balanced → return 0."""
-        holdings = {
-            "SPYM": 30,
-            "AVUV": 5,
-            "VGIT": 50,
-            "GLDM": 80,
-            "518880.SS": 0,
-            "SGOV": 100,
-            "511360.SS": 0,
-        }
-        prices = {
-            "SPYM": 72.5,
-            "AVUV": 120.0,
-            "VGIT": 58.92,
-            "GLDM": 30.0,
-            "518880.SS": 5.50,
-            "SGOV": 100.0,
-            "511360.SS": 100.0,
-        }
-        state = self.make_state(holdings, prices)
-        C, _ = dca_minimum_plan(state, tolerance=0.50)
-        # With huge tolerance, should be 0
-        assert C == 0.0
-
-    def test_needs_investment(self):
-        """Imbalanced → positive C returned."""
-        holdings = {
-            "SPYM": 5,
-            "AVUV": 0,
-            "VGIT": 15,
-            "GLDM": 3,
-            "518880.SS": 0,
-            "SGOV": 5,
-            "511360.SS": 0,
-        }
-        prices = {
-            "SPYM": 72.5,
-            "AVUV": 120.0,
-            "VGIT": 58.92,
-            "GLDM": 30.0,
-            "518880.SS": 5.50,
-            "SGOV": 100.0,
-            "511360.SS": 100.0,
-        }
-        state = self.make_state(holdings, prices)
-        C, plan = dca_minimum_plan(state, tolerance=0.005)
-        assert C > 0
-        assert len(plan) > 0
-
-    def test_max_dev_decreases(self):
-        """After proposed allocation, max deviation must decrease."""
-        holdings = {
-            "SPYM": 5,
-            "AVUV": 0,
-            "VGIT": 15,
-            "GLDM": 3,
-            "518880.SS": 0,
-            "SGOV": 5,
-            "511360.SS": 0,
-        }
-        prices = {
-            "SPYM": 72.5,
-            "AVUV": 120.0,
-            "VGIT": 58.92,
-            "GLDM": 30.0,
-            "518880.SS": 5.50,
-            "SGOV": 100.0,
-            "511360.SS": 100.0,
-        }
-        state = self.make_state(holdings, prices)
-        C, plan = dca_minimum_plan(state, tolerance=0.005)
-        if C > 0:
-            # Verify plan reduces deviation (integration check)
-            pass  # Validated by C > 0 and plan non-empty
+    with pytest.raises(ValueError, match="invalid holdings"):
+        build_plan({"518880.SS": 50}, PRICES, 1.0, 100.0)

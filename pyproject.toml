@@ -1,18 +1,16 @@
 [project]
 name = "ppt"
-version = "0.1.0"
-description = "永久投资组合辅助工具 — 主动优化的计划器 + 记账本"
+version = "0.2.0"
+description = "永久投资组合 OSS 账本与三级优先均衡计划器"
 requires-python = ">=3.11"
 dependencies = [
     "yfinance>=0.2.40",
-    "pandas>=2.0",
-    "numpy>=1.24",
     "rich>=13.0",
     "click>=8.1",
 ]
 
 [project.scripts]
-ppt = "ppt.cli:main"
+ppt = "ppt.cli:run"
 
 [project.optional-dependencies]
 dev = [
@@ -33,16 +31,6 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
-
-[tool.ruff.lint.per-file-ignores]
-"ppt/valuation.py" = ["N806", "N803"]
-"tests/test_valuation.py" = ["N806"]
-"ppt/rebalance.py" = ["N806", "N803"]
-"tests/test_rebalance.py" = ["N806", "N803"]
-"ppt/returns.py" = ["N806", "N803"]
-"tests/test_returns.py" = ["N806", "N803"]
-"ppt/display.py" = ["N806", "N803"]
-"ppt/cli.py" = ["N806", "N803"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

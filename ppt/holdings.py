@@ -1,413 +1,379 @@
-"""Holdings I/O (§2) — OSS-only storage, undo, transaction history."""
+"""Immutable signed-trade ledger persisted as one atomic OSS object."""
 
-import logging
+from __future__ import annotations
+
 import math
-from contextlib import nullcontext
+import os
+import re
+import uuid
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
-from ppt.constants import (
-    BUCKETS,
-    OSS_BACKUP_PATH,
-    OSS_HOLDINGS_PATH,
-    OSS_PRICE_HISTORY_PATH,
-    TICKER_CURRENCY,
-    TICKER_LOT_SIZE,
-    TICKER_WHITELIST,
+from ppt.constants import TICKER_CURRENCY, TICKER_LOT_SIZE, TICKER_WHITELIST
+from ppt.storage import (
+    IStorageBackend,
+    ObjectNotFoundError,
+    OssBackend,
+    StorageConfigurationError,
 )
-from ppt.storage import IStorageBackend, OssBackend
-
-logger = logging.getLogger(__name__)
 
 
-def is_nan(val) -> bool:
-    """Check whether a value is float NaN."""
-    return isinstance(val, float) and math.isnan(val)
+class LedgerError(ValueError):
+    """Base class for invalid ledger operations or persisted data."""
 
 
-# ── Validation ────────────────────────────────────────────────────────────────
+class InvalidTradeError(LedgerError):
+    """A trade does not satisfy the fixed ticker and lot-size contract."""
 
 
-def validate_transaction_input(
-    ticker: str,
-    shares: float,
-    price: float,
-) -> list[str]:
-    """Validate user input for buy/sell command (§5). Returns list of errors."""
-    errors = []
+class InvalidLedgerError(LedgerError):
+    """The stored object is not the current ledger format."""
 
-    if ticker not in TICKER_WHITELIST:
-        errors.append(f"Unknown ticker: {ticker}")
-        return errors
 
-    shares_is_number = isinstance(shares, (int, float)) and not isinstance(shares, bool)
-    price_is_number = isinstance(price, (int, float)) and not isinstance(price, bool)
-    if not shares_is_number:
-        errors.append(f"Shares must be numeric: {shares}")
-    elif not math.isfinite(shares):
-        errors.append(f"Shares must be finite: {shares}")
-    elif shares <= 0:
-        errors.append(f"Shares must be positive: {shares}")
-    if not price_is_number:
-        errors.append(f"Price must be numeric: {price}")
-    elif not math.isfinite(price):
-        errors.append(f"Price must be finite: {price}")
-    elif price <= 0:
-        errors.append(f"Price must be positive: {price}")
+class LedgerNotInitializedError(LedgerError):
+    """A mutation was attempted before ``initialize``."""
 
-    lot = TICKER_LOT_SIZE[ticker]
-    if shares_is_number and math.isfinite(shares) and shares != int(shares):
-        errors.append(f"Shares must be integer: {shares}")
-    elif shares_is_number and math.isfinite(shares) and int(shares) % lot != 0:
-        if lot == 100:
-            errors.append(f"A-share shares must be multiple of 100: {shares}")
-        else:
-            errors.append(f"USD shares must be whole shares: {shares}")
 
+class InsufficientHoldingsError(LedgerError):
+    """A signed batch would make at least one position negative."""
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _valid_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return timestamp.tzinfo is not None
+
+
+def validate_trade_input(ticker: object, shares: object, price: object) -> list[str]:
+    """Return every error in one signed trade input.
+
+    Positive shares buy and negative shares sell. Zero, fractional quantities,
+    non-finite prices, unknown tickers, and illegal lot sizes are rejected.
+    """
+
+    errors: list[str] = []
+    if not isinstance(ticker, str) or ticker not in TICKER_WHITELIST:
+        return [f"Unknown ticker: {ticker}"]
+
+    if isinstance(shares, bool) or not isinstance(shares, int):
+        errors.append(f"Shares must be a signed integer: {shares}")
+    elif shares == 0:
+        errors.append("Shares must not be zero")
+    elif abs(shares) % TICKER_LOT_SIZE[ticker] != 0:
+        lot = TICKER_LOT_SIZE[ticker]
+        errors.append(f"Shares for {ticker} must be a multiple of {lot}: {shares}")
+
+    if (
+        isinstance(price, bool)
+        or not isinstance(price, (int, float))
+        or not math.isfinite(price)
+        or price <= 0
+    ):
+        errors.append(f"Price must be positive and finite: {price}")
     return errors
 
 
-def validate_holdings(data: dict) -> bool:
-    """Validate holdings JSON structure."""
-    if not isinstance(data, dict):
-        return False
-    required = {"holdings", "cash_in", "cash_out", "transactions", "created_at"}
-    if not all(k in data for k in required):
-        return False
-    if not isinstance(data["holdings"], dict):
-        return False
-    cash_values = (data["cash_in"], data["cash_out"])
-    if any(
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-        for value in cash_values
-    ):
-        return False
-    if any(
-        isinstance(shares, bool)
-        or not isinstance(shares, (int, float))
-        or not math.isfinite(shares)
-        or shares < 0
-        for shares in data["holdings"].values()
-    ):
-        return False
-    if not isinstance(data["transactions"], list):
-        return False
-    if not isinstance(data["created_at"], str):
+@dataclass(frozen=True, slots=True)
+class Trade:
+    """One trade leg; the sign of ``shares`` is its direction."""
+
+    ticker: str
+    shares: int
+    price: float
+
+    def __post_init__(self) -> None:
+        errors = validate_trade_input(self.ticker, self.shares, self.price)
+        if errors:
+            raise InvalidTradeError("; ".join(errors))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"ticker": self.ticker, "shares": self.shares, "price": self.price}
+
+
+@dataclass(frozen=True, slots=True)
+class TradeBatch:
+    """One atomic user-recorded batch with the historical FX rate."""
+
+    batch_id: str
+    executed_at: str
+    usdcny: float
+    trades: tuple[Trade, ...]
+
+    def __post_init__(self) -> None:
+        try:
+            uuid.UUID(self.batch_id)
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise InvalidLedgerError(f"Invalid batch id: {self.batch_id}") from exc
+        if not _valid_timestamp(self.executed_at):
+            raise InvalidLedgerError(f"Invalid batch timestamp: {self.executed_at}")
+        if (
+            isinstance(self.usdcny, bool)
+            or not isinstance(self.usdcny, (int, float))
+            or not math.isfinite(self.usdcny)
+            or self.usdcny <= 0
+        ):
+            raise InvalidLedgerError(f"Invalid USD/CNY rate: {self.usdcny}")
+        _validate_trade_sequence(self.trades)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.batch_id,
+            "executed_at": self.executed_at,
+            "usdcny": self.usdcny,
+            "trades": [trade.to_dict() for trade in self.trades],
+        }
+
+
+def _validate_trade_sequence(trades: Sequence[Trade]) -> None:
+    if not trades:
+        raise InvalidTradeError("A batch must contain at least one trade")
+    seen: set[str] = set()
+    for trade in trades:
+        if not isinstance(trade, Trade):
+            raise InvalidTradeError("Every batch item must be a Trade")
+        if trade.ticker in seen:
+            raise InvalidTradeError(f"Duplicate ticker in one batch: {trade.ticker}")
+        seen.add(trade.ticker)
+
+
+def _trade_from_dict(data: object) -> Trade:
+    if not isinstance(data, dict) or set(data) != {"ticker", "shares", "price"}:
+        raise InvalidLedgerError("Invalid trade object")
+    try:
+        return Trade(ticker=data["ticker"], shares=data["shares"], price=data["price"])
+    except InvalidTradeError as exc:
+        raise InvalidLedgerError(str(exc)) from exc
+
+
+def _batch_from_dict(data: object) -> TradeBatch:
+    if not isinstance(data, dict) or set(data) != {"id", "executed_at", "usdcny", "trades"}:
+        raise InvalidLedgerError("Invalid batch object")
+    raw_trades = data["trades"]
+    if not isinstance(raw_trades, list):
+        raise InvalidLedgerError("Batch trades must be a list")
+    trades = tuple(_trade_from_dict(trade) for trade in raw_trades)
+    return TradeBatch(
+        batch_id=data["id"],
+        executed_at=data["executed_at"],
+        usdcny=data["usdcny"],
+        trades=trades,
+    )
+
+
+def _validated_batches(ledger: object) -> tuple[TradeBatch, ...]:
+    if not isinstance(ledger, dict) or set(ledger) != {"initialized_at", "batches"}:
+        raise InvalidLedgerError("Ledger must contain only initialized_at and batches")
+    if not _valid_timestamp(ledger["initialized_at"]):
+        raise InvalidLedgerError("Ledger initialized_at must be a timezone-aware timestamp")
+    raw_batches = ledger["batches"]
+    if not isinstance(raw_batches, list):
+        raise InvalidLedgerError("Ledger batches must be a list")
+
+    batches = tuple(_batch_from_dict(batch) for batch in raw_batches)
+    ids = [batch.batch_id for batch in batches]
+    if len(ids) != len(set(ids)):
+        raise InvalidLedgerError("Ledger contains duplicate batch ids")
+    return batches
+
+
+def ledger_batches(ledger: object) -> tuple[TradeBatch, ...]:
+    """Return immutable, fully validated batches in recorded order."""
+
+    return _validated_batches(ledger)
+
+
+def derive_holdings(ledger: object) -> dict[str, int]:
+    """Purely replay signed batches into current whole-share positions."""
+
+    holdings = {ticker: 0 for ticker in sorted(TICKER_WHITELIST)}
+    for batch in _validated_batches(ledger):
+        for trade in batch.trades:
+            updated = holdings[trade.ticker] + trade.shares
+            if updated < 0:
+                raise InvalidLedgerError(
+                    f"Batch {batch.batch_id} oversells {trade.ticker}: "
+                    f"{holdings[trade.ticker]} + {trade.shares}"
+                )
+            holdings[trade.ticker] = updated
+    return holdings
+
+
+def _trade_value_cny(trade: Trade, usdcny: float) -> float:
+    multiplier = usdcny if TICKER_CURRENCY[trade.ticker] == "USD" else 1.0
+    try:
+        value = abs(trade.shares) * trade.price * multiplier
+    except OverflowError as exc:
+        raise InvalidLedgerError(f"Trade value overflows for {trade.ticker}") from exc
+    if not math.isfinite(value):
+        raise InvalidLedgerError(f"Trade value is not finite for {trade.ticker}")
+    return value
+
+
+def batch_net_cash_flow(batch: TradeBatch) -> float:
+    """Return sale proceeds minus purchase costs in CNY for one batch."""
+
+    cash_flow = sum(
+        _trade_value_cny(trade, batch.usdcny) * (-1.0 if trade.shares > 0 else 1.0)
+        for trade in batch.trades
+    )
+    if not math.isfinite(cash_flow):
+        raise InvalidLedgerError(f"Batch cash flow is not finite: {batch.batch_id}")
+    return cash_flow
+
+
+def batch_net_investment(batch: TradeBatch) -> float:
+    """Return purchase costs minus sale proceeds in CNY for one batch."""
+
+    return -batch_net_cash_flow(batch)
+
+
+def cash_summary(ledger: object) -> dict[str, float]:
+    """Derive cumulative net contributions and withdrawals by atomic batch.
+
+    A mixed rebalance batch contributes only its net external cash movement;
+    its internal sale and purchase legs do not inflate both cumulative totals.
+    """
+
+    cash_in = 0.0
+    cash_out = 0.0
+    for batch in _validated_batches(ledger):
+        net_investment = batch_net_investment(batch)
+        if net_investment > 0:
+            cash_in += net_investment
+        elif net_investment < 0:
+            cash_out -= net_investment
+        if not math.isfinite(cash_in) or not math.isfinite(cash_out):
+            raise InvalidLedgerError("Cumulative ledger cash flow is not finite")
+    return {
+        "cash_in": cash_in,
+        "cash_out": cash_out,
+        "net_cash": cash_in - cash_out,
+    }
+
+
+def validate_ledger(ledger: object) -> bool:
+    """Return whether an object is exactly the current replayable format."""
+
+    try:
+        derive_holdings(ledger)
+        cash_summary(ledger)
+    except LedgerError:
         return False
     return True
 
 
-# ── Transaction ───────────────────────────────────────────────────────────────
-
-
-@dataclass
-class Transaction:
-    """A single buy/sell transaction (§2.1)."""
-
-    txn_id: str
-    date: str
-    txn_type: str  # "buy" | "sell"
-    trades: list[dict[str, Any]]
-    usdcny: float
-    internal: bool = False
-
-    def to_dict(self) -> dict:
-        amount_cny = 0.0
-        for trade in self.trades:
-            trade_amount = trade["shares"] * trade["price"]
-            if trade["currency"] == "USD":
-                trade_amount *= self.usdcny
-            amount_cny += trade_amount
-        return {
-            "id": self.txn_id,
-            "date": self.date,
-            "type": self.txn_type,
-            "trades": self.trades,
-            "usdcny": self.usdcny,
-            "amount_cny": round(amount_cny, 2),
-            "internal": self.internal,
-        }
-
-
-# ── Holdings Store ────────────────────────────────────────────────────────────
-
-
 class HoldingsStore:
-    """OSS-only holdings state manager. No local data files (§2.1)."""
+    """Serialize all ledger mutations through one OSS lock."""
 
     def __init__(
         self,
-        local_dir: Path | None = None,
-        backend: IStorageBackend | None = None,
+        *,
+        backend: IStorageBackend,
+        holdings_path: str,
+        backup_prefix: str,
     ):
-        # local_dir kept for config/logs only (no data files)
-        self.local_dir = local_dir or Path.home() / ".pp"
-        self.local_dir.mkdir(parents=True, exist_ok=True)
-        self.backend = backend or OssBackend()
+        self.backend = backend
+        self.holdings_path = holdings_path
+        self.backup_prefix = backup_prefix.rstrip("/")
 
-    # ── OSS core I/O — delegated to backend ────────────────────────────────
+    @classmethod
+    def from_environment(cls) -> HoldingsStore:
+        """Build the production store; PP_OSS_BUCKET is intentionally required."""
 
-    def _oss_backup(self) -> None:
-        """Create backup of holdings on OSS."""
-        if isinstance(self.backend, OssBackend) and not self.backend.copy(
-            OSS_HOLDINGS_PATH, OSS_BACKUP_PATH
-        ):
-            raise RuntimeError("Failed to back up holdings on OSS")
+        bucket = os.environ.get("PP_OSS_BUCKET", "").strip()
+        if not bucket:
+            raise StorageConfigurationError(
+                "PP_OSS_BUCKET is required; refusing to use an implicit holdings bucket"
+            )
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", bucket) is None:
+            raise StorageConfigurationError(f"Invalid PP_OSS_BUCKET: {bucket}")
+        return cls(
+            backend=OssBackend(),
+            holdings_path=f"oss://{bucket}/pp_holdings.json",
+            backup_prefix=f"oss://{bucket}/backups/pp_holdings",
+        )
 
-    def _mutation_lock(self):
-        if isinstance(self.backend, OssBackend):
-            return self.backend.lock(OSS_HOLDINGS_PATH)
-        return nullcontext()
+    def _backup_path(self, purpose: str) -> str:
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        return f"{self.backup_prefix}/{timestamp}-{purpose}-{uuid.uuid4()}.json"
 
-    # ── Holdings (public API) ─────────────────────────────────────────────
+    def load(self) -> dict[str, Any] | None:
+        """Load a valid current ledger; return None only when definitely absent."""
 
-    def load(self) -> dict | None:
-        """Load holdings from OSS."""
-        data = self.backend.read(OSS_HOLDINGS_PATH)
-        if data and validate_holdings(data):
-            return data
-        if data:
-            logger.error("Invalid holdings data on OSS")
-        return None
-
-    def _save_unlocked(self, data: dict, *, backup: bool = True) -> None:
-        if not validate_holdings(data):
-            raise ValueError("Refusing to save invalid holdings state")
-        if backup:
-            self._oss_backup()
-        if not self.backend.write(OSS_HOLDINGS_PATH, data):
-            raise RuntimeError("Failed to save holdings to OSS")
-
-    def save(self, data: dict, *, backup: bool = True) -> None:
-        """Save holdings to OSS with backup."""
-        with self._mutation_lock():
-            self._save_unlocked(data, backup=backup)
-
-    # ── Transactions ─────────────────────────────────────────────────────
-
-    def add_transaction(self, txn: Transaction) -> None:
-        """Add a transaction and update holdings."""
-        self.add_transactions([txn])
-
-    def add_transactions(self, transactions: list[Transaction]) -> None:
-        """Validate and persist one atomic transaction batch."""
-        if not transactions:
-            return
-        with self._mutation_lock():
-            state = self.load()
-            if state is None:
-                raise RuntimeError("No holdings state. Run init first.")
-            state = deepcopy(state)
-
-            for txn in transactions:
-                if txn.txn_type not in {"buy", "sell"}:
-                    raise ValueError(f"Invalid transaction type: {txn.txn_type}")
-                if (
-                    isinstance(txn.usdcny, bool)
-                    or not isinstance(txn.usdcny, (int, float))
-                    or not math.isfinite(txn.usdcny)
-                    or txn.usdcny <= 0
-                ):
-                    raise ValueError(f"Invalid USD/CNY rate: {txn.usdcny}")
-                if not txn.trades:
-                    raise ValueError("Transaction must contain at least one trade")
-
-                for trade in txn.trades:
-                    ticker = trade.get("ticker")
-                    shares = trade.get("shares")
-                    price = trade.get("price")
-                    if not isinstance(shares, (int, float)) or not isinstance(price, (int, float)):
-                        raise ValueError("Trade shares and price must be numeric")
-                    errors = validate_transaction_input(ticker, shares, price)
-                    if errors:
-                        raise ValueError("; ".join(errors))
-                    if trade.get("currency") != TICKER_CURRENCY[ticker]:
-                        raise ValueError(f"Invalid currency for {ticker}: {trade.get('currency')}")
-
-                    current = state["holdings"].get(ticker, 0.0)
-                    if txn.txn_type == "sell" and shares > current:
-                        raise ValueError(
-                            f"Insufficient holdings for {ticker}: need {shares}, have {current}"
-                        )
-                    delta = shares if txn.txn_type == "buy" else -shares
-                    state["holdings"][ticker] = current + delta
-
-                record = txn.to_dict()
-                if not txn.internal:
-                    if txn.txn_type == "buy":
-                        state["cash_in"] += record["amount_cny"]
-                    else:
-                        state["cash_out"] += record["amount_cny"]
-                state["transactions"].append(record)
-
-            self._save_unlocked(state)
-
-    def undo_last(self) -> dict | None:
-        """Undo the most recent transaction. Returns the removed transaction or None."""
-        with self._mutation_lock():
-            state = self.load()
-            if state is None or not state["transactions"]:
-                logger.info("Nothing to undo")
-                return None
-            state = deepcopy(state)
-
-            last = state["transactions"].pop()
-            for trade in last["trades"]:
-                ticker = trade["ticker"]
-                delta = -trade["shares"] if last["type"] == "buy" else trade["shares"]
-                state["holdings"][ticker] = state["holdings"].get(ticker, 0.0) + delta
-                if state["holdings"][ticker] < 0:
-                    logger.warning(
-                        "Undo clamped %s from %s to 0",
-                        ticker,
-                        state["holdings"][ticker],
-                    )
-                    state["holdings"][ticker] = 0.0
-
-            if not last.get("internal", False):
-                cash_key = "cash_in" if last["type"] == "buy" else "cash_out"
-                state[cash_key] = max(0.0, state[cash_key] - last["amount_cny"])
-
-            self._save_unlocked(state)
-            return last
-
-    # ── Price history ────────────────────────────────────────────────────
-
-    def load_price_history(self) -> list[dict]:
-        """Load bucket price history from OSS."""
-        return self.backend.read_list(OSS_PRICE_HISTORY_PATH)
-
-    def _save_price_history(self, history: list[dict]) -> None:
-        """Save price history to OSS."""
-        self.backend.write(OSS_PRICE_HISTORY_PATH, history)
-
-    def clean_price_history(self) -> int:
-        """Remove entries where any bucket price is NaN. Returns count removed.
-
-        Mirrors the NaN guard in cli.py status() — an entry is removed if
-        *any* of its stock/bond/gold/cash values is NaN.
-        """
-        history = self.load_price_history()
-
-        def _entry_has_nan(entry: dict) -> bool:
-            prices = entry.get("prices_cny", {})
-            return any(is_nan(prices.get(b, 0)) for b in BUCKETS)
-
-        cleaned = [e for e in history if not _entry_has_nan(e)]
-        removed = len(history) - len(cleaned)
-        if removed > 0:
-            self._save_price_history(cleaned)
-        return removed
-
-    def update_price_history(self, entry: dict) -> None:
-        """Append/update today's bucket price entry. Trim to max 120.
-
-        If history ≤ 30 entries after update, attempt to backfill ~60 days (§2.2).
-        """
-        history = self.load_price_history()
-        today = entry["date"]
-
-        # Overwrite if same date exists
-        updated = False
-        for i, h in enumerate(history):
-            if h["date"] == today:
-                history[i] = entry
-                updated = True
-                break
-        if not updated:
-            history.append(entry)
-
-        # Sort by date ascending
-        history.sort(key=lambda x: x["date"])
-
-        # Trim to max 120
-        if len(history) > 120:
-            history = history[-120:]
-
-        # Backfill if ≤ 30 entries (§2.2)
-        if len(history) <= 30:
-            history = self._backfill_history(history)
-
-        self._save_price_history(history)
-
-    def _backfill_history(self, history: list[dict]) -> list[dict]:
-        """Backfill ~3 months (~60 trading days) of bucket prices via yfinance."""
         try:
-            import yfinance as yf
+            ledger = self.backend.read(self.holdings_path)
+        except ObjectNotFoundError:
+            return None
+        # Parsing the batches also proves that old or internally inconsistent
+        # formats cannot silently enter calculations.
+        derive_holdings(ledger)
+        cash_summary(ledger)
+        return deepcopy(ledger)
 
-            from ppt.constants import BUCKETS as _BUCKETS
-            from ppt.constants import CNY_TICKERS, PRIMARY_TICKER
+    def initialize(self) -> str | None:
+        """Back up any object, then atomically replace it with an empty ledger."""
 
-            # Determine earliest date needed
-            if history:
-                earliest = history[0]["date"]
-            else:
-                from datetime import datetime
+        ledger = {"initialized_at": _now_iso(), "batches": []}
+        backup_path: str | None = None
+        with self.backend.lock(self.holdings_path):
+            if self.backend.exists(self.holdings_path):
+                backup_path = self._backup_path("init")
+                self.backend.copy(self.holdings_path, backup_path)
+            self.backend.write(self.holdings_path, ledger)
+        return backup_path
 
-                earliest = datetime.now().strftime("%Y-%m-%d")
+    def record_batch(
+        self,
+        trades: Sequence[Trade],
+        usdcny: float,
+    ) -> TradeBatch:
+        """Validate and append one batch with backup-before-write semantics."""
 
-            # Fetch 3 months of daily data for primary tickers + USDCNY
-            tickers_set = set()
-            for b in _BUCKETS:
-                t = PRIMARY_TICKER[b]
-                tickers_set.add(t)
-            tickers_set.add("CNY=X")  # USDCNY rate
+        normalized_trades = tuple(trades)
+        _validate_trade_sequence(normalized_trades)
+        batch = TradeBatch(
+            batch_id=str(uuid.uuid4()),
+            executed_at=_now_iso(),
+            usdcny=usdcny,
+            trades=normalized_trades,
+        )
 
-            tickers_list = sorted(tickers_set)
-            df = yf.download(tickers_list, period="3mo", progress=False)
-            if df.empty:
-                return history
+        with self.backend.lock(self.holdings_path):
+            try:
+                ledger = self.backend.read(self.holdings_path)
+            except ObjectNotFoundError as exc:
+                raise LedgerNotInitializedError("Ledger not initialized; run ppt init") from exc
 
-            close = df["Close"]
-            existing_dates = {h["date"] for h in history}
-
-            # Use iterrows() for cleaner row iteration (avoid repeated iloc lookups)
-            for row_date_idx, row_data in close.iterrows():
-                row_date = (
-                    str(row_date_idx.date())
-                    if hasattr(row_date_idx, "date")
-                    else str(row_date_idx)[:10]
-                )
-                if row_date >= earliest or row_date in existing_dates:
-                    continue
-
-                # Extract USDCNY rate for this row
-                usdcny_row = 7.25
-                try:
-                    usdcny_row = float(row_data.get("CNY=X", 7.25))
-                except (TypeError, ValueError):
-                    pass
-
-                entry_cny = {}
-                for b in _BUCKETS:
-                    t = PRIMARY_TICKER[b]
-                    try:
-                        val = float(row_data[t])
-                    except (KeyError, TypeError):
-                        val = None
-                    if val is not None:
-                        # Convert USD tickers to CNY
-                        if t not in CNY_TICKERS:
-                            val = val * usdcny_row
-                        entry_cny[b] = val
-
-                if len(entry_cny) == len(_BUCKETS):
-                    history.append(
-                        {
-                            "date": row_date,
-                            "prices_cny": entry_cny,
-                        }
+            holdings = derive_holdings(ledger)
+            for trade in batch.trades:
+                available = holdings[trade.ticker]
+                updated = available + trade.shares
+                if updated < 0:
+                    raise InsufficientHoldingsError(
+                        f"Insufficient holdings for {trade.ticker}: "
+                        f"have {available}, change {trade.shares}"
                     )
-                    existing_dates.add(row_date)
+                holdings[trade.ticker] = updated
 
-            history.sort(key=lambda x: x["date"])
-            logger.info("Backfilled %d price history entries", len(history))
-        except Exception as e:
-            logger.debug("Price history backfill skipped: %s", e)
+            updated_ledger = deepcopy(ledger)
+            updated_ledger["batches"].append(batch.to_dict())
+            # Validate the exact persisted representation before any backup or
+            # write, so invalid input has zero storage side effects.
+            derive_holdings(updated_ledger)
+            cash_summary(updated_ledger)
 
-        return history
+            backup_path = self._backup_path("write")
+            self.backend.copy(self.holdings_path, backup_path)
+            self.backend.write(self.holdings_path, updated_ledger)
+        return batch

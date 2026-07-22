@@ -18,13 +18,9 @@ env/
 *.swp
 *.swo
 
-# Environment
+# Local environment overrides
 .env
 .env.*
-!.env.template
-
-# Data storage
-/pp_tracer_data/
 
 # macOS
 .DS_Store

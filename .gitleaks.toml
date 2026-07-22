@@ -3,10 +3,3 @@
 
 [extend]
 useDefault = true
-
-[allowlist]
-description = "Global allowlist"
-paths = [
-  ".coderabbit.yaml",
-  "CLAUDE.md",
-]

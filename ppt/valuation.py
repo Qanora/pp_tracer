@@ -1,271 +1,161 @@
-"""Pure calculation layer (§4.1–§4.5).
+"""Pure portfolio valuation and balance scoring.
 
-No IO, no print, no side effects. All configurable parameters
-are injected via function arguments (not read from files/env).
+The target portfolio has three strictly ordered objectives:
+
+1. four buckets at 25% each;
+2. equal market value for the tickers inside each bucket;
+3. total USD/CNY market value at 50%/50%.
+
+This module deliberately contains no IO, configuration, or presentation code.
 """
 
-import math
+from __future__ import annotations
 
-import numpy as np
+from dataclasses import dataclass
 
 from ppt.constants import (
+    BUCKET_ORDER,
     BUCKET_TICKERS,
-    BUCKETS,
     CNY_TICKERS,
-    CORRIDOR_HARD_CAP,
-    CORRIDOR_HARD_FLOOR,
-    CORRIDOR_HMIN,
-    EPSILON,
-    VOL_FALLBACK,
-    VOL_FLOOR,
+    TARGET_BUCKET_WEIGHT,
+    TARGET_CURRENCY_WEIGHT,
+    USD_TICKERS,
 )
 
-# ── §4.1 权重计算 ────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class BalanceScore:
+    """Lexicographic balance score; lower is better.
+
+    ``bucket_*`` is priority one, ``intra_*`` priority two, and
+    ``currency`` priority three.  The paired max/total components make each
+    priority deterministic without allowing a later priority to compensate
+    for an earlier one.
+    """
+
+    bucket_max: float
+    bucket_total: float
+    intra_max: float
+    intra_total: float
+    currency: float
+
+    def as_tuple(self) -> tuple[float, float, float, float, float]:
+        return (
+            self.bucket_max,
+            self.bucket_total,
+            self.intra_max,
+            self.intra_total,
+            self.currency,
+        )
 
 
 def ticker_values_cny(
-    holdings: dict[str, float],
+    holdings: dict[str, int | float],
     prices: dict[str, float],
     usdcny: float,
 ) -> dict[str, float]:
-    """ticker → CNY market value.
+    """Return the CNY market value of every fixed ticker.
 
-    USD tickers: holdings * price * usdcny
-    CNY tickers: holdings * price (direct)
+    Validation belongs at the boundary that creates a market snapshot.  This
+    pure primitive assumes positive, finite prices and exchange rate.
     """
-    result: dict[str, float] = {}
-    for t, shares in holdings.items():
-        if shares == 0:
-            result[t] = 0.0
-            continue
-        price = prices.get(t, 0.0)
-        if t in CNY_TICKERS:
-            result[t] = shares * price
-        else:
-            result[t] = shares * price * usdcny
-    return result
+
+    return {
+        ticker: holdings.get(ticker, 0)
+        * prices[ticker]
+        * (1.0 if ticker in CNY_TICKERS else usdcny)
+        for bucket in BUCKET_ORDER
+        for ticker in BUCKET_TICKERS[bucket]
+    }
 
 
 def bucket_values(ticker_vals: dict[str, float]) -> dict[str, float]:
-    """Sum ticker CNY values into bucket values."""
-    bv: dict[str, float] = {b: 0.0 for b in BUCKETS}
-    for bucket, tickers in BUCKET_TICKERS.items():
-        bv[bucket] = sum(ticker_vals.get(t, 0.0) for t in tickers)
-    return bv
+    """Aggregate ticker values into the four buckets in stable order."""
 
-
-def bucket_weights(bucket_vals: dict[str, float]) -> dict[str, float]:
-    """Bucket weight = bucket_value / total."""
-    total = sum(bucket_vals.values())
-    if abs(total) < EPSILON:
-        return {b: 0.0 for b in BUCKETS}
-    return {b: v / total for b, v in bucket_vals.items()}
+    return {
+        bucket: sum(ticker_vals.get(ticker, 0.0) for ticker in BUCKET_TICKERS[bucket])
+        for bucket in BUCKET_ORDER
+    }
 
 
 def total_value(bucket_vals: dict[str, float]) -> float:
-    """Sum of all bucket values."""
-    return sum(bucket_vals.values())
+    """Return total portfolio market value."""
+
+    return sum(bucket_vals.get(bucket, 0.0) for bucket in BUCKET_ORDER)
 
 
-def currency_split(
-    holdings: dict[str, float],
-    prices: dict[str, float],
-    usdcny: float,
-) -> dict[str, float]:
-    """Compute USD/CNY value split from ticker-level holdings.
+def bucket_weights(bucket_vals: dict[str, float]) -> dict[str, float]:
+    """Return bucket weights, or four zeros for an empty portfolio."""
 
-    Returns: {"usd": usd_total_cny, "cny": cny_total, "total": total}
-    """
-    from ppt.constants import USD_TICKERS
-
-    usd_total = 0.0
-    cny_total = 0.0
-    for ticker, shares in holdings.items():
-        if shares <= 0:
-            continue
-        p_cny = prices.get(ticker, 0.0)
-        if ticker in USD_TICKERS:
-            val = shares * p_cny * usdcny
-            usd_total += val
-        else:
-            val = shares * p_cny
-            cny_total += val
-    return {"usd": usd_total, "cny": cny_total, "total": usd_total + cny_total}
-
-
-# ── §4.2 目标权重 ────────────────────────────────────────────────────────────
+    total = total_value(bucket_vals)
+    if total <= 0:
+        return {bucket: 0.0 for bucket in BUCKET_ORDER}
+    return {bucket: bucket_vals.get(bucket, 0.0) / total for bucket in BUCKET_ORDER}
 
 
 def equal_target_weights() -> dict[str, float]:
-    """Equal-weight: each bucket = 0.25."""
-    return {b: 0.25 for b in BUCKETS}
+    """Return the immutable four-bucket strategic target."""
+
+    return {bucket: TARGET_BUCKET_WEIGHT for bucket in BUCKET_ORDER}
 
 
-def risk_parity_weights(
-    sigmas: dict[str, float],
-    cap: float = 0.40,
-    floor: float = 0.10,
-    max_iter: int = 20,
+def currency_split(
+    holdings: dict[str, int | float],
+    prices: dict[str, float],
+    usdcny: float,
 ) -> dict[str, float]:
-    """Risk parity with cap/floor via iterative clipping algorithm.
+    """Return CNY-valued USD/CNY holdings and total value."""
 
-    1. w*_b ∝ 1/σ_b
-    2. Repeatedly pin overshooting buckets to cap/floor,
-       redistribute excess to free buckets proportionally.
-    3. Normalize to sum=1.
+    ticker_vals = ticker_values_cny(holdings, prices, usdcny)
+    usd = sum(ticker_vals[ticker] for ticker in USD_TICKERS)
+    cny = sum(ticker_vals[ticker] for ticker in CNY_TICKERS)
+    return {"usd": usd, "cny": cny, "total": usd + cny}
+
+
+def balance_score(
+    holdings: dict[str, int | float],
+    prices: dict[str, float],
+    usdcny: float,
+) -> BalanceScore:
+    """Calculate the three ordered deviations for a portfolio.
+
+    Intra-bucket deviations are normalized by total portfolio value, not by
+    the bucket itself.  This keeps empty buckets well-defined and ensures that
+    the score represents actual CNY imbalance.  Single-ticker buckets have no
+    intra-bucket deviation.
     """
-    buckets = list(BUCKETS)
 
-    # Step 1: raw inverse-vol weights
-    inv_vol = {b: 1.0 / max(sigmas.get(b, 0.01), EPSILON) for b in buckets}
-    total_inv = sum(inv_vol.values())
-    w = {b: inv_vol[b] / total_inv for b in buckets}
+    ticker_vals = ticker_values_cny(holdings, prices, usdcny)
+    buckets = bucket_values(ticker_vals)
+    total = total_value(buckets)
+    weights = bucket_weights(buckets)
 
-    # Step 2: iterative clipping
-    for _ in range(max_iter):
-        pinned: dict[str, float] = {}
-        free: list[str] = []
-        excess = 0.0
+    bucket_deviations = [
+        abs(weights[bucket] - TARGET_BUCKET_WEIGHT) for bucket in BUCKET_ORDER
+    ]
 
-        for b in buckets:
-            if w[b] >= cap - EPSILON:
-                pinned[b] = cap
-                excess += w[b] - cap
-            elif w[b] <= floor + EPSILON:
-                pinned[b] = floor
-                excess += w[b] - floor
-            else:
-                free.append(b)
+    intra_deviations: list[float] = []
+    if total > 0:
+        for bucket in BUCKET_ORDER:
+            tickers = BUCKET_TICKERS[bucket]
+            if len(tickers) < 2:
+                continue
+            equal_value = buckets[bucket] / len(tickers)
+            intra_deviations.extend(
+                abs(ticker_vals[ticker] - equal_value) / total for ticker in tickers
+            )
 
-        if not free or abs(excess) < EPSILON:
-            break
+    split = currency_split(holdings, prices, usdcny)
+    currency_deviation = (
+        abs(split["usd"] / split["total"] - TARGET_CURRENCY_WEIGHT)
+        if split["total"] > 0
+        else TARGET_CURRENCY_WEIGHT
+    )
 
-        # Redistribute excess among free buckets proportionally
-        free_weight_sum = sum(w[b] for b in free)
-        if free_weight_sum > EPSILON:
-            for b in free:
-                w[b] += excess * (w[b] / free_weight_sum)
-        else:
-            # All buckets pinned — special case: cap-limited stay at cap,
-            # rest get equal share of remaining
-            remaining = 1.0 - sum(pinned.get(b, 0.0) for b in buckets if b not in free)
-            if free:
-                equal_share = remaining / len(free)
-                for b in free:
-                    w[b] = max(equal_share, floor)
-
-        for b, val in pinned.items():
-            w[b] = val
-
-    # Step 3: normalize
-    total = sum(w.values())
-    if total > EPSILON:
-        w = {b: v / total for b, v in w.items()}
-
-    return w
-
-
-# ── §4.3 波动率估计 ──────────────────────────────────────────────────────────
-
-
-def volatility(
-    prices: list[float],
-    fallback: float | None = None,
-) -> float:
-    """60-day rolling annualized volatility from price sequence.
-
-    r_t = (P_t - P_{t-1}) / P_{t-1}
-    sigma = std(r) * sqrt(252)
-
-    Returns fallback if <20 returns available; floor at VOL_FLOOR.
-    """
-    if len(prices) < 2:
-        return fallback if fallback is not None else VOL_FALLBACK["stock"]
-
-    arr = np.asarray(prices, dtype=np.float64)
-    returns = np.diff(arr) / arr[:-1]
-
-    if len(returns) < 20:
-        return fallback if fallback is not None else VOL_FALLBACK["stock"]
-
-    sigma = float(np.std(returns, ddof=1) * np.sqrt(252))
-
-    return max(sigma, VOL_FLOOR)
-
-
-# ── §4.4 自适应走廊 ──────────────────────────────────────────────────────────
-
-
-def corridor_bounds(
-    w_star: float,
-    sigma: float | None,
-    k: float = 2.5,
-) -> tuple[float, float]:
-    """Adaptive rebalancing corridor.
-
-    h = max(k * sigma / sqrt(12), h_min)
-    L = max(w* - h, hard_floor)
-    U = min(w* + h, hard_cap)
-
-    If sigma is None → fallback fixed thresholds [0.15, 0.35].
-    """
-    if sigma is None:
-        return (0.15, 0.35)
-
-    h = max(k * sigma / math.sqrt(12), CORRIDOR_HMIN)
-    L = max(w_star - h, CORRIDOR_HARD_FLOOR)
-    U = min(w_star + h, CORRIDOR_HARD_CAP)
-    return (L, U)
-
-
-# ── §4.5 趋势信号与走廊调整 ──────────────────────────────────────────────────
-
-
-def trend_signal(
-    prices: list[float],
-    S: int = 10,
-    L: int = 20,
-) -> float:
-    """Trend signal: MA_S / MA_L - 1.
-
-    Returns 0.0 if insufficient data (< L prices).
-    """
-    if len(prices) < L:
-        return 0.0
-
-    arr = np.asarray(prices, dtype=np.float64)
-    ma_short = float(np.mean(arr[-S:]))
-    ma_long = float(np.mean(arr[-L:]))
-
-    if abs(ma_long) < EPSILON:
-        return 0.0
-
-    return ma_short / ma_long - 1.0
-
-
-def trend_adjusted_corridor(
-    w_star: float,
-    sigma: float | None,
-    trend: float,
-    k: float = 2.5,
-    lam: float = 0.5,
-) -> tuple[float, float]:
-    """Adjust corridor bounds based on trend signal.
-
-    - Weak bucket (trend < 0): raise upper bound (delay selling)
-    - Strong bucket (trend > 0): lower floor (delay buying)
-    - Only one boundary moves, corridor never narrows.
-
-    Δ = lam * |trend| * (U - L)
-    """
-    L, U = corridor_bounds(w_star, sigma, k)
-    delta = lam * abs(trend) * (U - L)
-
-    if trend < -EPSILON:
-        # Weak: raise upper
-        U = min(U + delta, CORRIDOR_HARD_CAP)
-    elif trend > EPSILON:
-        # Strong: lower floor
-        L = max(L - delta, CORRIDOR_HARD_FLOOR)
-
-    return (L, U)
+    return BalanceScore(
+        bucket_max=max(bucket_deviations, default=0.0),
+        bucket_total=sum(bucket_deviations),
+        intra_max=max(intra_deviations, default=0.0),
+        intra_total=sum(intra_deviations),
+        currency=currency_deviation,
+    )
